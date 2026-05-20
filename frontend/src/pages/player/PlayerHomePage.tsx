@@ -216,34 +216,7 @@ export function PlayerHomePage() {
           }
           autoComplete="off"
         />
-        <p className="mt-1 text-xs text-slate-400">
-          16 碼大寫英數(<span className="font-mono">0-9, A-F</span>)
-        </p>
         {uidError && <p className="mt-2 text-sm text-rose-600">{uidError}</p>}
-
-        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-slate-400">或使用社群帳號:</span>
-          <button
-            disabled
-            title="v1.1 開放"
-            className="rounded border border-slate-300 px-2 py-1 text-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            G Google
-            <span className="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-amber-700">
-              v1.1
-            </span>
-          </button>
-          <button
-            disabled
-            title="v1.2 開放"
-            className="rounded border border-slate-300 px-2 py-1 text-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            f Facebook
-            <span className="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-amber-700">
-              v1.2
-            </span>
-          </button>
-        </div>
       </section>
 
       {/* 商品分類 tabs — 手機橫向 scroll 不卡 */}
@@ -293,15 +266,6 @@ export function PlayerHomePage() {
           ))}
         </div>
       )}
-
-      {/* 付款方式說明 */}
-      <section className="mt-6 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600 sm:p-4">
-        <h3 className="mb-1 font-semibold text-slate-700">💳 付款方式</h3>
-        <p>
-          點購買後將導向 MyCard 安全付款頁,可選{' '}
-          <strong>信用卡 / 行動支付 / 電信帳單 / 銀行轉帳</strong> 等多種方式。
-        </p>
-      </section>
 
       {selected && (
         <ProductDetailModal

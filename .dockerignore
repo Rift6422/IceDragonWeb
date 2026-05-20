@@ -66,13 +66,9 @@ temp/
 .tmp/
 *.bak
 
-# Docker / Compose meta(主要 Dockerfile 在 docker/Dockerfile,build context 要看得到它)
+# Docker / Compose meta(Dockerfile 在 repo root,build context 要看得到它)
 docker-compose*.yml
 .dockerignore
-# 舊的單獨 Dockerfile(被 docker/Dockerfile 取代)
-docker/backend.Dockerfile
-docker/frontend.Dockerfile
-docker/nginx.conf
 
 # Python scripts(不放進 backend/frontend image)
 scripts/
