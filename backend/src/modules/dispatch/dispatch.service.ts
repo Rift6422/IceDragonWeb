@@ -1,0 +1,143 @@
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { DeliveryStatus, OrderStatus, Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { OrderStateService } from '../orders/order-state.service';
+import { MAIL_DISPATCHER, MailDispatcher, DispatchResult } from './mail-dispatcher.interface';
+
+interface ProductEffectsJson {
+  effects?: Array<{ type: string; code: string; amount?: number; qty?: number; duration_seconds?: number }>;
+  mail?: { subject?: string; body?: string; expire_days?: number };
+}
+
+@Injectable()
+export class DispatchService {
+  private readonly logger = new Logger(DispatchService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly state: OrderStateService,
+    @Inject(MAIL_DISPATCHER) private readonly dispatcher: MailDispatcher,
+  ) {}
+
+  /**
+   * 對 CONFIRMED 的訂單派發到遊戲信件
+   *
+   * 流程:
+   *   1. 確認 order.status = CONFIRMED 且未派發成功過(冪等)
+   *   2. 組 payload(從 product_snapshot.effects)
+   *   3. 呼叫 dispatcher.dispatch
+   *   4. 記 delivery_attempts
+   *   5. 成功 → state.transition(CONFIRMED → DELIVERED)
+   *   6. 失敗 → 看 attempt 次數,< 3 留 CONFIRMED 等重試,≥ 3 轉 DELIVERY_FAILED
+   *
+   * @returns 是否成功派發
+   */
+  async tryDispatch(orderId: string): Promise<{ ok: boolean; status: OrderStatus }> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        user: { select: { uid: true } },
+        deliveryAttempts: {
+          where: { status: DeliveryStatus.SUCCESS },
+          take: 1,
+        },
+      },
+    });
+
+    if (!order) throw new Error(`Order ${orderId} not found`);
+
+    // 已派發成功 → 冪等,跳過(防補儲多次觸發重派)
+    if (order.deliveryAttempts.length > 0) {
+      this.logger.log(`Order ${order.facTradeSeq} 已派發成功過,跳過`);
+      return { ok: true, status: order.status };
+    }
+
+    // 只能在 CONFIRMED 派發
+    if (order.status !== OrderStatus.CONFIRMED && order.status !== OrderStatus.DELIVERY_FAILED) {
+      this.logger.warn(
+        `Order ${order.facTradeSeq} 狀態為 ${order.status},非 CONFIRMED/DELIVERY_FAILED,跳過派發`,
+      );
+      return { ok: false, status: order.status };
+    }
+
+    // 組 payload
+    const snapshot = order.productSnapshot as { effects?: ProductEffectsJson };
+    const productEffects = (snapshot.effects ?? {}) as ProductEffectsJson;
+    const payload = {
+      subject: productEffects.mail?.subject ?? `購買成功 - ${order.facTradeSeq}`,
+      body: productEffects.mail?.body ?? '感謝您的購買',
+      expire_days: productEffects.mail?.expire_days ?? 30,
+      effects: productEffects.effects ?? [],
+    };
+
+    // 算目前是第幾次
+    const attemptCount = await this.prisma.deliveryAttempt.count({
+      where: { orderId: order.id },
+    });
+    const attemptNumber = attemptCount + 1;
+
+    // 呼叫 dispatcher
+    let result: DispatchResult;
+    try {
+      result = await this.dispatcher.dispatch({
+        orderId: order.id,
+        facTradeSeq: order.facTradeSeq,
+        uid: order.user.uid,
+        payload,
+      });
+    } catch (err) {
+      result = {
+        ok: false,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        durationMs: 0,
+      };
+    }
+
+    // 記 delivery_attempts
+    await this.prisma.deliveryAttempt.create({
+      data: {
+        orderId: order.id,
+        attemptNumber,
+        status: result.ok ? DeliveryStatus.SUCCESS : DeliveryStatus.FAILED,
+        requestPayload: payload as unknown as Prisma.InputJsonValue,
+        responseStatus: result.responseStatus ?? null,
+        responseBody: result.responseBody ?? null,
+        errorMessage: result.errorMessage ?? null,
+        durationMs: result.durationMs,
+      },
+    });
+
+    if (result.ok) {
+      await this.state.transition({
+        orderId: order.id,
+        toStatus: OrderStatus.DELIVERED,
+        triggeredBy: 'system',
+        reason: `Dispatched (attempt #${attemptNumber}, mail_id=${result.mailId ?? 'unknown'})`,
+        metadata: { mail_id: result.mailId ?? null, attempt: attemptNumber },
+      });
+      return { ok: true, status: OrderStatus.DELIVERED };
+    }
+
+    // 失敗:重試 ≥ 3 → 進 DELIVERY_FAILED(人工)
+    const MAX_AUTO_RETRY = 3;
+    if (attemptNumber >= MAX_AUTO_RETRY) {
+      await this.state.transition({
+        orderId: order.id,
+        toStatus: OrderStatus.DELIVERY_FAILED,
+        triggeredBy: 'system',
+        reason: `Dispatch failed after ${attemptNumber} attempts: ${result.errorMessage}`,
+        metadata: { last_error: result.errorMessage ?? null },
+      });
+      this.logger.error(
+        `Order ${order.facTradeSeq} 派發失敗 ${attemptNumber} 次,標記 DELIVERY_FAILED`,
+      );
+      return { ok: false, status: OrderStatus.DELIVERY_FAILED };
+    }
+
+    // 失敗但未滿次數:留 CONFIRMED 等下次重試
+    this.logger.warn(
+      `Order ${order.facTradeSeq} 派發失敗(${attemptNumber}/${MAX_AUTO_RETRY}),維持 ${order.status}`,
+    );
+    return { ok: false, status: order.status };
+  }
+}

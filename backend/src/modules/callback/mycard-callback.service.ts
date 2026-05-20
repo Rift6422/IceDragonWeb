@@ -1,0 +1,421 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { CallbackDirection, CallbackKind, OrderStatus, Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { OrderStateService } from '../orders/order-state.service';
+import { MyCardApiService } from '../mycard/api-client/mycard-api.service';
+import { MyCardHashFactory } from '../mycard/hash/mycard-hash.factory';
+import { DispatchService } from '../dispatch/dispatch.service';
+
+interface TradeResultPayload {
+  ReturnCode: string;
+  ReturnMsg?: string;
+  PayResult?: string;
+  FacTradeSeq?: string;
+  PaymentType?: string;
+  Amount?: string;
+  Currency?: string;
+  MyCardTradeNo?: string;
+  MyCardType?: string;
+  PromoCode?: string;
+  SerialId?: string;
+  Hash?: string;
+}
+
+interface SupplementDataPayload {
+  ReturnCode?: string;
+  ReturnMsg?: string;
+  FacServiceId?: string;
+  TotalNum?: number;
+  FacTradeSeq?: string[];
+}
+
+@Injectable()
+export class MyCardCallbackService {
+  private readonly logger = new Logger(MyCardCallbackService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly state: OrderStateService,
+    private readonly mycard: MyCardApiService,
+    private readonly hashFactory: MyCardHashFactory,
+    private readonly dispatch: DispatchService,
+  ) {}
+
+  // ============================================================
+  // §3.2.4 交易結果回傳(POST,MyCard 跳轉回我們)
+  // ============================================================
+
+  async handleTradeResult(
+    payload: TradeResultPayload,
+    meta: { sourceIp?: string; userAgent?: string; rawBody?: string },
+  ): Promise<{ ok: boolean; processed: boolean }> {
+    // 1. 記 inbound log
+    const log = await this.writeInboundLog(CallbackKind.TRADE_RESULT, meta, payload);
+
+    // 2. 驗 Hash
+    const hashValid = this.verifyTradeResultHash(payload);
+    await this.prisma.callbackLog.update({
+      where: { id: log.id },
+      data: { hashValid },
+    });
+    if (!hashValid) {
+      await this.markLogProcessed(log.id, false, 'Hash mismatch');
+      this.logger.warn(`TradeResult callback hash invalid for ${payload.FacTradeSeq}`);
+      return { ok: false, processed: false };
+    }
+
+    // 3. 找訂單
+    if (!payload.FacTradeSeq) {
+      await this.markLogProcessed(log.id, false, 'Missing FacTradeSeq');
+      return { ok: false, processed: false };
+    }
+    const order = await this.prisma.order.findUnique({
+      where: { facTradeSeq: payload.FacTradeSeq },
+    });
+    if (!order) {
+      await this.markLogProcessed(log.id, false, 'Order not found');
+      return { ok: false, processed: false };
+    }
+
+    // 連回 callback log 到該訂單
+    await this.prisma.callbackLog.update({
+      where: { id: log.id },
+      data: { orderId: order.id },
+    });
+
+    // 4. 只認 PayResult=3 為成功
+    if (payload.PayResult !== '3') {
+      // 已是終態就跳過
+      if (order.status === OrderStatus.FAILED || order.status === OrderStatus.CANCELLED) {
+        await this.markLogProcessed(log.id, true, null);
+        return { ok: true, processed: false };
+      }
+      await this.state.transition({
+        orderId: order.id,
+        toStatus: OrderStatus.FAILED,
+        triggeredBy: 'mycard_callback',
+        reason: `PayResult=${payload.PayResult} (${payload.ReturnMsg ?? ''})`,
+        metadata: payload as unknown as Prisma.InputJsonValue,
+      });
+      await this.markLogProcessed(log.id, true, null);
+      return { ok: true, processed: true };
+    }
+
+    // 5. 防重複儲值 — 用 mycard_trade_no unique
+    if (payload.MyCardTradeNo) {
+      const existed = await this.prisma.transaction.findUnique({
+        where: { mycardTradeNo: payload.MyCardTradeNo },
+      });
+      if (existed && existed.orderId !== order.id) {
+        await this.markLogProcessed(log.id, false, 'Duplicate MyCardTradeNo for different order');
+        this.logger.error(
+          `Duplicate MyCardTradeNo ${payload.MyCardTradeNo} — existing order ${existed.orderId}, incoming ${order.id}`,
+        );
+        return { ok: false, processed: false };
+      }
+    }
+
+    // 6. 更新 transaction 欄位
+    await this.prisma.transaction.update({
+      where: { orderId: order.id },
+      data: {
+        mycardTradeNo: payload.MyCardTradeNo ?? null,
+        paymentType: payload.PaymentType ?? null,
+        mycardType: payload.MyCardType ?? null,
+        payResult: 3,
+        promoCode: payload.PromoCode ?? null,
+        serialId: payload.SerialId ?? null,
+        resultRawBody: payload as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    // 7. AUTHED → PAID(冪等:已是 PAID 不會錯)
+    if (order.status === OrderStatus.AUTHED) {
+      await this.state.transition({
+        orderId: order.id,
+        toStatus: OrderStatus.PAID,
+        triggeredBy: 'mycard_callback',
+        reason: 'TradeResult PayResult=3',
+        metadata: { my_card_trade_no: payload.MyCardTradeNo ?? null },
+      });
+    }
+
+    // 8. 立刻打 PaymentConfirm(請款)→ CONFIRMED
+    const tx = await this.prisma.transaction.findUnique({ where: { orderId: order.id } });
+    if (tx?.authCode) {
+      const confirmResult = await this.mycard.paymentConfirm(tx.authCode, order.id);
+      if (confirmResult.ok) {
+        await this.prisma.transaction.update({
+          where: { orderId: order.id },
+          data: { confirmRawResponse: confirmResult.data as unknown as Prisma.InputJsonValue },
+        });
+        const afterConfirm = await this.prisma.order.findUnique({ where: { id: order.id } });
+        if (afterConfirm && afterConfirm.status === OrderStatus.PAID) {
+          await this.state.transition({
+            orderId: order.id,
+            toStatus: OrderStatus.CONFIRMED,
+            triggeredBy: 'system',
+            reason: 'PaymentConfirm success',
+          });
+        }
+        // 9. 派發
+        await this.dispatch.tryDispatch(order.id);
+      } else {
+        this.logger.warn(
+          `PaymentConfirm failed for ${order.facTradeSeq}: ${confirmResult.returnCode} ${confirmResult.returnMsg}`,
+        );
+      }
+    }
+
+    await this.markLogProcessed(log.id, true, null);
+    return { ok: true, processed: true };
+  }
+
+  // ============================================================
+  // §3.6 補儲通知(POST x-www-form-urlencoded,DATA=JSON)
+  // ============================================================
+
+  async handleSupplement(
+    rawData: string,
+    meta: { sourceIp?: string; userAgent?: string; rawBody?: string },
+  ): Promise<{ ok: boolean; processed: number }> {
+    const log = await this.writeInboundLog(CallbackKind.SUPPLEMENT, meta, { DATA: rawData });
+
+    let data: SupplementDataPayload;
+    try {
+      data = JSON.parse(rawData) as SupplementDataPayload;
+    } catch {
+      await this.markLogProcessed(log.id, false, 'Invalid JSON in DATA');
+      return { ok: false, processed: 0 };
+    }
+
+    const seqList = data.FacTradeSeq ?? [];
+    let processed = 0;
+    for (const facTradeSeq of seqList) {
+      try {
+        await this.reprocessOne(facTradeSeq);
+        processed++;
+      } catch (err) {
+        this.logger.error(
+          `Supplement reprocess failed for ${facTradeSeq}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    await this.markLogProcessed(log.id, true, null);
+    return { ok: true, processed };
+  }
+
+  /**
+   * 單筆補儲處理:打 TradeQuery + PaymentConfirm + 派發
+   */
+  private async reprocessOne(facTradeSeq: string): Promise<void> {
+    const order = await this.prisma.order.findUnique({
+      where: { facTradeSeq },
+      include: { transaction: true },
+    });
+    if (!order || !order.transaction?.authCode) return;
+    if (order.status === OrderStatus.DELIVERED) return; // 已派發,跳過
+
+    // TradeQuery
+    const q = await this.mycard.tradeQuery(order.transaction.authCode, order.id);
+    if (!q.ok || q.data.PayResult !== '3') return;
+
+    // 更新 transaction
+    await this.prisma.transaction.update({
+      where: { orderId: order.id },
+      data: {
+        mycardTradeNo: q.data.MyCardTradeNo ?? order.transaction.mycardTradeNo,
+        paymentType: q.data.PaymentType ?? order.transaction.paymentType,
+        payResult: 3,
+        resultRawBody: q.data as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    // AUTHED → PAID(若還在 AUTHED)
+    if (order.status === OrderStatus.AUTHED) {
+      await this.state.transition({
+        orderId: order.id,
+        toStatus: OrderStatus.PAID,
+        triggeredBy: 'mycard_callback',
+        reason: 'Supplement: TradeQuery PayResult=3',
+      });
+    }
+
+    // PaymentConfirm + 派發
+    const c = await this.mycard.paymentConfirm(order.transaction.authCode, order.id);
+    if (c.ok) {
+      const refreshed = await this.prisma.order.findUnique({ where: { id: order.id } });
+      if (refreshed && refreshed.status === OrderStatus.PAID) {
+        await this.state.transition({
+          orderId: order.id,
+          toStatus: OrderStatus.CONFIRMED,
+          triggeredBy: 'system',
+          reason: 'Supplement: PaymentConfirm success',
+        });
+      }
+      await this.dispatch.tryDispatch(order.id);
+    }
+  }
+
+  // ============================================================
+  // §3.7 差異比對(POST,回 JSON 給 MyCard)
+  // ============================================================
+
+  async handleDiffReport(query: {
+    StartDateTime?: string;
+    EndDateTime?: string;
+    MyCardTradeNo?: string;
+  }): Promise<{ trades: unknown[] }> {
+    // 找成功訂單
+    const where: Prisma.OrderWhereInput = {
+      status: OrderStatus.DELIVERED,
+      transaction: { payResult: 3 },
+    };
+
+    if (query.MyCardTradeNo) {
+      where.transaction = { mycardTradeNo: query.MyCardTradeNo };
+    } else if (query.StartDateTime && query.EndDateTime) {
+      where.confirmedAt = {
+        gte: new Date(query.StartDateTime),
+        lte: new Date(query.EndDateTime),
+      };
+    }
+
+    const orders = await this.prisma.order.findMany({
+      where,
+      include: { transaction: true, user: { select: { uid: true, createdAt: true, createdIp: true } } },
+      orderBy: { confirmedAt: 'asc' },
+      take: 1000,
+    });
+
+    return {
+      trades: orders.map((o) => ({
+        PaymentType: o.transaction?.paymentType ?? '',
+        TradeSeq: o.transaction?.tradeSeq ?? '',
+        MyCardTradeNo: o.transaction?.mycardTradeNo ?? '',
+        FacTradeSeq: o.facTradeSeq,
+        CustomerId: o.user.uid,
+        Amount: o.amount.toString(),
+        Currency: o.currency,
+        TradeDateTime: this.toUtc8(o.confirmedAt ?? o.createdAt),
+        CreateAccountDateTime: this.toUtc8(o.user.createdAt),
+        CreateAccountIP: o.user.createdIp ?? '',
+      })),
+    };
+  }
+
+  // ============================================================
+  // 廠商儲值紀錄查詢(GET,回 CSV+<BR>)
+  // ============================================================
+
+  async handleTopupRecords(query: {
+    StartDate?: string;
+    EndDate?: string;
+    MyCardID?: string;
+  }): Promise<string> {
+    const where: Prisma.OrderWhereInput = {
+      status: OrderStatus.DELIVERED,
+    };
+
+    if (query.MyCardID) {
+      where.transaction = { mycardTradeNo: query.MyCardID };
+    } else if (query.StartDate && query.EndDate) {
+      where.confirmedAt = {
+        gte: new Date(query.StartDate),
+        lte: new Date(`${query.EndDate}T23:59:59`),
+      };
+    }
+
+    const orders = await this.prisma.order.findMany({
+      where,
+      include: {
+        transaction: true,
+        product: { select: { code: true, nameDisplay: true } },
+        user: { select: { uid: true, createdAt: true, createdIp: true } },
+      },
+      orderBy: { confirmedAt: 'asc' },
+      take: 5000,
+    });
+
+    // CSV 11 欄,每筆 <BR> 結尾
+    return orders
+      .map((o) => {
+        const fields = [
+          o.transaction?.mycardTradeNo ?? '',
+          o.user.uid,
+          o.transaction?.tradeSeq ?? '',
+          o.facTradeSeq,
+          this.toUtc8(o.confirmedAt ?? o.createdAt),
+          o.amount.toString(),
+          o.currency,
+          o.product.code,
+          o.product.nameDisplay,
+          this.toUtc8(o.user.createdAt),
+          o.user.createdIp ?? '',
+        ];
+        return fields.join(',') + ' <BR>';
+      })
+      .join('\n');
+  }
+
+  // ============================================================
+  // helpers
+  // ============================================================
+
+  private verifyTradeResultHash(payload: TradeResultPayload): boolean {
+    if (!payload.Hash) return false;
+    return this.hashFactory.get().verifyTradeResult(
+      {
+        returnCode: payload.ReturnCode ?? '',
+        payResult: payload.PayResult ?? '',
+        facTradeSeq: payload.FacTradeSeq ?? '',
+        paymentType: payload.PaymentType ?? '',
+        amount: payload.Amount ?? '',
+        currency: payload.Currency ?? '',
+        myCardTradeNo: payload.MyCardTradeNo ?? '',
+        myCardType: payload.MyCardType ?? '',
+        promoCode: payload.PromoCode ?? '',
+      },
+      payload.Hash,
+    );
+  }
+
+  private async writeInboundLog(
+    kind: CallbackKind,
+    meta: { sourceIp?: string; userAgent?: string; rawBody?: string },
+    body: unknown,
+  ): Promise<{ id: string }> {
+    return this.prisma.callbackLog.create({
+      data: {
+        direction: CallbackDirection.INBOUND,
+        kind,
+        httpMethod: 'POST',
+        url: `/api/mycard/${kind.toLowerCase().replace(/_/g, '-')}`,
+        requestBody: meta.rawBody ?? JSON.stringify(body),
+        sourceIp: meta.sourceIp ?? null,
+        userAgent: meta.userAgent ?? null,
+        processed: false,
+      },
+      select: { id: true },
+    });
+  }
+
+  private async markLogProcessed(
+    logId: string,
+    processed: boolean,
+    errorMessage: string | null,
+  ): Promise<void> {
+    await this.prisma.callbackLog.update({
+      where: { id: logId },
+      data: { processed, errorMessage },
+    });
+  }
+
+  private toUtc8(d: Date | null): string {
+    if (!d) return '';
+    // 將 UTC 時間 +8 後格式化為 'YYYY-MM-DDTHH:mm:ss'
+    const utc8 = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+    return utc8.toISOString().replace(/\.\d{3}Z$/, '').replace('T', 'T');
+  }
+}

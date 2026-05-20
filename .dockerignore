@@ -1,0 +1,79 @@
+# =================================================================
+# .dockerignore — 排除進入 Docker build context 的檔案
+# 加快 build + 避免 secrets 進 image
+# =================================================================
+
+# Dependencies
+node_modules/
+**/node_modules/
+.pnpm-store/
+.yarn/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+**/dist/
+**/build/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# 機密文件
+docs-private/
+*.pdf
+*.pptx
+*.docx
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docs(production image 不需要)
+docs/
+*.md
+!README.md
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Test
+coverage/
+.nyc_output/
+
+# Temp
+tmp/
+temp/
+.tmp/
+*.bak
+
+# Docker / Compose meta(主要 Dockerfile 在 docker/Dockerfile,build context 要看得到它)
+docker-compose*.yml
+.dockerignore
+# 舊的單獨 Dockerfile(被 docker/Dockerfile 取代)
+docker/backend.Dockerfile
+docker/frontend.Dockerfile
+docker/nginx.conf
+
+# Python scripts(不放進 backend/frontend image)
+scripts/
+*.py

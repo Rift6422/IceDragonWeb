@@ -1,0 +1,561 @@
+// icedragon × MyCard
+// Prisma DB Schema — Stage 1
+// 版本: 1.0 (2026-05-18)
+// PostgreSQL 15+
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 1. GameUser(玩家) — 對應 MyCard CustomerId
+//
+// ⚠️ Source of truth = 遊戲端(決議 #A5)
+//    - 本系統「只讀」,不主動建立 / 修改 / 刪除 GameUser
+//    - 後台對 GameUser read-only
+//    - sync 機制待 #A6 釐清,本期(v1.0)走 lazy 模式
+//    - 與 AdminUser 完全分離,兩張表不互通
+// ============================================================
+
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  /// 遊戲 UID:16 碼大寫 hex(64-bit),例 `E9E3E1A9071AF9DC`
+  /// - 與遊戲端共用同一個 UID(決議 #A1)
+  /// - 由遊戲端建立(決議 #A5);本系統 read-only
+  /// - 作為 MyCard `CustomerId` 傳遞
+  /// - 字元集 [0-9A-F]{16},完全符合 MyCard CustomerId 字元白名單
+  /// - 64-bit 空間(1.8 × 10^19),碰撞機率可忽略
+  uid           String    @unique @db.Char(16)
+  email         String?   @unique
+  emailVerified Boolean   @default(false) @map("email_verified")
+  displayName   String?   @map("display_name")
+  avatarUrl     String?   @map("avatar_url")
+  /// Google OAuth sub id(MVP 唯一 provider)
+  googleId      String?   @unique @map("google_id")
+  /// v1.1 再加 Facebook
+  // facebookId   String?   @unique @map("facebook_id")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+  /// 註冊 IP — MyCard §3.7 差異比對需回傳
+  createdIp     String?   @map("created_ip") @db.Inet
+  lastLoginAt   DateTime? @map("last_login_at") @db.Timestamptz()
+  lastLoginIp   String?   @map("last_login_ip") @db.Inet
+  isActive      Boolean   @default(true) @map("is_active")
+
+  orders              Order[]
+  inventoryCurrencies InventoryCurrency[]
+  inventoryLedgers    InventoryLedger[]
+  directTopups        DirectTopupAttempt[]
+
+  @@index([email])
+  @@map("users")
+}
+
+// ============================================================
+// 2. 商品(Products)
+// ============================================================
+
+enum ProductStatus {
+  ACTIVE   @map("active")
+  INACTIVE @map("inactive")
+
+  @@map("product_status")
+}
+
+model Product {
+  id             String        @id @default(uuid()) @db.Uuid
+  /// 內部商品代碼,如 DIAMOND_150
+  code           String        @unique
+  /// 對應 MyCard ItemCode(MyCard 提供,可空 = 不指定品項)
+  mycardItemCode String?       @map("mycard_item_code")
+  /// 顯示給 MyCard 用的 ProductName(中文 2 字元計,上限 100)
+  nameDisplay    String        @map("name_display") @db.VarChar(100)
+  /// 後台用的內部名稱
+  nameInternal   String        @map("name_internal")
+  description    String?
+  amount         Decimal       @db.Decimal(12, 2)
+  currency       String        @default("TWD") @db.Char(3)
+  /// ProductEffect JSON — 派發效果與信件內容定義
+  /// 範例見 schema 末尾「Appendix A: ProductEffect JSON」
+  effects        Json
+  status         ProductStatus @default(ACTIVE)
+  sortOrder      Int           @default(0) @map("sort_order")
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz()
+
+  orders Order[]
+
+  @@index([status, sortOrder])
+  @@map("products")
+}
+
+// ============================================================
+// 3. 訂單(Orders)+ 狀態機
+// ============================================================
+
+enum OrderStatus {
+  /// 剛建單,等取得 AuthCode
+  PENDING         @map("pending")
+  /// 取得 AuthCode,等用戶付款
+  AUTHED          @map("authed")
+  /// 用戶付款成功(PayResult=3),等 PaymentConfirm
+  PAID            @map("paid")
+  /// PaymentConfirm 成功,等派發
+  CONFIRMED       @map("confirmed")
+  /// 商品已派發 (終態)
+  DELIVERED       @map("delivered")
+  /// 派發失敗,等人工或自動重試
+  DELIVERY_FAILED @map("delivery_failed")
+  /// 玩家取消 / Timeout
+  CANCELLED       @map("cancelled")
+  /// 付款失敗 (終態)
+  FAILED          @map("failed")
+
+  @@map("order_status")
+}
+
+model Order {
+  id              String      @id @default(uuid()) @db.Uuid
+  /// 廠商交易序號(送 MyCard 用)— 自產生,長度 ≤ 50,字元限制 [a-zA-Z0-9_-]
+  facTradeSeq     String      @unique @map("fac_trade_seq") @db.VarChar(50)
+  userId          String      @map("user_id") @db.Uuid
+  productId       String      @map("product_id") @db.Uuid
+  /// 建單當下的商品內容快照(防 product 之後被改影響稽核)
+  productSnapshot Json        @map("product_snapshot")
+  amount          Decimal     @db.Decimal(12, 2)
+  currency        String      @db.Char(3)
+  status          OrderStatus @default(PENDING)
+  failureReason   String?     @map("failure_reason")
+  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt       DateTime    @updatedAt @map("updated_at") @db.Timestamptz()
+  /// 狀態時間點(便於對帳與分析)
+  authedAt        DateTime?   @map("authed_at") @db.Timestamptz()
+  paidAt          DateTime?   @map("paid_at") @db.Timestamptz()
+  confirmedAt     DateTime?   @map("confirmed_at") @db.Timestamptz()
+  deliveredAt     DateTime?   @map("delivered_at") @db.Timestamptz()
+
+  user             User                 @relation(fields: [userId], references: [id])
+  product          Product              @relation(fields: [productId], references: [id])
+  transaction      Transaction?
+  statusHistory    OrderStatusHistory[]
+  deliveryAttempts DeliveryAttempt[]
+  callbackLogs     CallbackLog[]
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+  @@index([createdAt(sort: Desc)])
+  @@map("orders")
+}
+
+/// 訂單狀態變更稽核軌跡(必查)
+model OrderStatusHistory {
+  id          String       @id @default(uuid()) @db.Uuid
+  orderId     String       @map("order_id") @db.Uuid
+  fromStatus  OrderStatus? @map("from_status")
+  toStatus    OrderStatus  @map("to_status")
+  reason      String?
+  /// system / mycard_callback / admin:<admin_id>
+  triggeredBy String       @map("triggered_by")
+  metadata    Json?
+  createdAt   DateTime     @default(now()) @map("created_at") @db.Timestamptz()
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@index([orderId, createdAt])
+  @@map("order_status_history")
+}
+
+// ============================================================
+// 4. MyCard 交易(Transactions)— 1:1 with Order
+// ============================================================
+
+model Transaction {
+  /// 同 order_id(1:1)
+  orderId            String    @id @map("order_id") @db.Uuid
+  /// MyCard AuthCode,文件建議 VARCHAR(256),我們留 512 緩衝
+  authCode           String?   @unique @map("auth_code") @db.VarChar(512)
+  /// MyCard 交易序號 TradeSeq
+  tradeSeq           String?   @map("trade_seq")
+  /// MyCard 卡片號 / Billing 號 / CGM 號 — 防重複儲值的最後一道閘門
+  mycardTradeNo      String?   @unique @map("mycard_trade_no")
+  /// INGAME / COSTPOINT / FA200000002...
+  paymentType        String?   @map("payment_type")
+  /// 通路代碼(INGAME 時才有)
+  mycardType         String?   @map("mycard_type")
+  /// 0=fail, 3=success
+  payResult          Int?      @map("pay_result")
+  /// 活動代碼
+  promoCode          String?   @map("promo_code")
+  /// 訂閱代碼(本期 out of scope,欄位預留)
+  serialId           String?   @map("serial_id")
+  /// 各階段的原始回傳留底(對帳+稽核)
+  authRawResponse    Json?     @map("auth_raw_response")
+  resultRawBody      Json?     @map("result_raw_body")
+  confirmRawResponse Json?     @map("confirm_raw_response")
+  paidAt             DateTime? @map("paid_at") @db.Timestamptz()
+  confirmedAt        DateTime? @map("confirmed_at") @db.Timestamptz()
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@map("transactions")
+}
+
+// ============================================================
+// 5. Callback Log(進出站全留底)
+// ============================================================
+
+enum CallbackDirection {
+  INBOUND  @map("inbound")
+  OUTBOUND @map("outbound")
+
+  @@map("callback_direction")
+}
+
+enum CallbackKind {
+  // === Outbound: icedragon → MyCard ===
+  AUTH_GLOBAL     @map("auth_global") // §3.1
+  TRADE_QUERY     @map("trade_query") // §3.3
+  PAYMENT_CONFIRM @map("payment_confirm") // §3.4
+  PAY_ITEM_QUERY  @map("pay_item_query") // §4.1
+  SDK_TRADE_QUERY @map("sdk_trade_query") // §4.2
+  // === Inbound (Model A): MyCard → icedragon ===
+  TRADE_RESULT    @map("trade_result") // §3.2.4
+  SUPPLEMENT      @map("supplement") // §3.6
+  DIFF_REPORT     @map("diff_report") // §3.7
+  TOPUP_RECORDS   @map("topup_records") // 廠商查詢服務(GET CSV + POST 差異比對 共用)
+  // === Inbound (Model B 直接儲值 v1.3.0): MyCard → icedragon ===
+  B_AUTH_RESULT     @map("b_auth_result") // §第 2 點:商家授權結果
+  B_ACCOUNT_VERIFY  @map("b_account_verify") // §第 3-7 點:帳密驗證結果
+  B_TOPUP_RESULT    @map("b_topup_result") // §第 9-11 點:儲值結果回覆
+
+  @@map("callback_kind")
+}
+
+model CallbackLog {
+  id             String            @id @default(uuid()) @db.Uuid
+  direction      CallbackDirection
+  kind           CallbackKind
+  orderId        String?           @map("order_id") @db.Uuid
+  httpMethod     String            @map("http_method") @db.VarChar(10)
+  url            String
+  requestHeaders Json?             @map("request_headers")
+  requestBody    String?           @map("request_body")
+  responseStatus Int?              @map("response_status")
+  responseBody   String?           @map("response_body")
+  sourceIp       String?           @map("source_ip") @db.Inet
+  userAgent      String?           @map("user_agent")
+  /// Hash 驗證結果(僅 inbound 有意義)
+  hashValid      Boolean?          @map("hash_valid")
+  processed      Boolean           @default(false)
+  errorMessage   String?           @map("error_message")
+  durationMs     Int?              @map("duration_ms")
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz()
+
+  order Order? @relation(fields: [orderId], references: [id])
+
+  @@index([kind, createdAt])
+  @@index([orderId])
+  @@index([direction, createdAt])
+  @@map("callback_logs")
+}
+
+// ============================================================
+// 6. 玩家庫存(Inventory)
+// ============================================================
+
+/// 虛擬貨幣餘額(鑽石、金幣 ...)
+model InventoryCurrency {
+  userId       String   @map("user_id") @db.Uuid
+  /// DIAMOND / GOLD / ...
+  currencyCode String   @map("currency_code")
+  balance      BigInt   @default(0)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@id([userId, currencyCode])
+  @@map("inventory_currency")
+}
+
+enum LedgerSource {
+  ORDER  @map("order")
+  ADMIN  @map("admin")
+  SYSTEM @map("system")
+  REFUND @map("refund")
+
+  @@map("ledger_source")
+}
+
+/// 庫存異動明細(全留底,可追蹤每筆鑽石加減的原因)
+model InventoryLedger {
+  id         String       @id @default(uuid()) @db.Uuid
+  userId     String       @map("user_id") @db.Uuid
+  sourceType LedgerSource @map("source_type")
+  sourceId   String?      @map("source_id") @db.Uuid
+  /// 異動內容,例如 {"type":"currency","code":"DIAMOND","delta":150}
+  effect     Json
+  metadata   Json?
+  createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz()
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([sourceType, sourceId])
+  @@map("inventory_ledger")
+}
+
+// ============================================================
+// 7. 派發紀錄(Delivery Attempts)— 對接遊戲信件 API 重試
+// ============================================================
+
+enum DeliveryStatus {
+  PENDING @map("pending")
+  SUCCESS @map("success")
+  FAILED  @map("failed")
+
+  @@map("delivery_status")
+}
+
+model DeliveryAttempt {
+  id             String         @id @default(uuid()) @db.Uuid
+  orderId        String         @map("order_id") @db.Uuid
+  attemptNumber  Int            @map("attempt_number")
+  status         DeliveryStatus
+  /// 送給遊戲信件 API 的 payload(信件主旨/內文/附件)
+  requestPayload Json?          @map("request_payload")
+  responseStatus Int?           @map("response_status")
+  responseBody   String?        @map("response_body")
+  errorMessage   String?        @map("error_message")
+  durationMs     Int?           @map("duration_ms")
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz()
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@unique([orderId, attemptNumber])
+  @@index([orderId])
+  @@index([status, createdAt])
+  @@map("delivery_attempts")
+}
+
+// ============================================================
+// 8. 後台帳號(Admin)
+// ============================================================
+
+enum AdminRole {
+  SUPER_ADMIN @map("super_admin")
+  CS          @map("cs")
+  FINANCE     @map("finance")
+
+  @@map("admin_role")
+}
+
+model AdminUser {
+  id               String    @id @default(uuid()) @db.Uuid
+  username         String    @unique
+  passwordHash     String    @map("password_hash")
+  email            String    @unique
+  role             AdminRole @default(CS)
+  /// 預留 2FA(本期不啟用)
+  totpSecret       String?   @map("totp_secret")
+  totpEnabled      Boolean   @default(false) @map("totp_enabled")
+  isActive         Boolean   @default(true) @map("is_active")
+  lastLoginAt      DateTime? @map("last_login_at") @db.Timestamptz()
+  lastLoginIp      String?   @map("last_login_ip") @db.Inet
+  failedLoginCount Int       @default(0) @map("failed_login_count")
+  lockedUntil      DateTime? @map("locked_until") @db.Timestamptz()
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz()
+
+  auditLogs AdminAuditLog[]
+
+  @@map("admin_users")
+}
+
+model AdminAuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  adminId    String   @map("admin_id") @db.Uuid
+  /// resync_order / redeliver / update_product / login / logout ...
+  action     String
+  /// order / product / user / admin_user ...
+  targetType String?  @map("target_type")
+  targetId   String?  @map("target_id")
+  payload    Json?
+  ipAddress  String?  @map("ip_address") @db.Inet
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  admin AdminUser @relation(fields: [adminId], references: [id])
+
+  @@index([adminId, createdAt])
+  @@index([action, createdAt])
+  @@index([targetType, targetId])
+  @@map("admin_audit_logs")
+}
+
+// ============================================================
+// 10. MyCard 直接儲值(Model B,v1.3.0)
+// ============================================================
+//
+// MyCard 主動發起的儲值流程,跟 Model A 的 orders 表並列。
+// 13 步流程(見 docs/12_MyCard_ModelB_直接儲值.md):
+//
+//   1.  用戶在 MyCard 完成付款/實體卡認證
+//   2.  MyCard POST → /api/mycard/direct-topup/auth-result(我方驗 SHA-1,寫紀錄)
+//   3.  MyCard 導用戶到 /api/mycard/direct-topup/account-verify(GET,渲染表單)
+//   4-7. 玩家輸 UID → POST 同 URL → 我方回 VRESULT(0=成功 / -1~-99=失敗)
+//   8.  MyCard 依 VRESULT 決定下一步
+//   9.  MyCard POST → /api/mycard/direct-topup/topup-result(實際儲值請求)
+//   10-11. 我方加值 + 派發 → 回 SRESULT(0=成功 / -1=失敗 / -2=已重複儲值)
+//   12. 成功則 MyCard 更新卡片狀態為「已儲值」
+//   13. 雙方對帳
+//
+// 關鍵不變式:
+//   - `mycardId` 全表 UNIQUE → 同一張卡絕對不可重複儲值
+//   - 重複時必回 SRESULT=-2 + SMESSAGE 帶卡號
+//   - 訊息以英文為主(規格要求,避免編碼問題)
+//   - 派發復用 MailDispatcher,不另外建一套
+// ============================================================
+
+enum DirectTopupStatus {
+  /// 第 2 步完成:授權結果已驗,等用戶到驗證頁
+  PENDING_VERIFY @map("pending_verify")
+  /// 第 4-7 步:驗證失敗(VRESULT != 0)
+  VERIFY_FAILED  @map("verify_failed")
+  /// 第 4-7 步:驗證成功(VRESULT = 0),等 MyCard 推儲值請求
+  VERIFY_OK      @map("verify_ok")
+  /// 第 9 步:收到儲值請求,處理中
+  TOPUP_PROCESSING @map("topup_processing")
+  /// 第 10-11 步:儲值成功 + 已派發到遊戲信箱
+  DELIVERED      @map("delivered")
+  /// 第 10 步:同 Mycard_id 重複進來,回 SRESULT=-2
+  DUPLICATE      @map("duplicate")
+  /// 任何階段失敗(VRESULT 不在 0,或派發失敗 ≥3 次)
+  FAILED         @map("failed")
+
+  @@map("direct_topup_status")
+}
+
+/// 直接儲值單一交易嘗試。每張 MyCard 卡(mycard_id)最多一筆 — UNIQUE 是冪等的閘門。
+model DirectTopupAttempt {
+  id                  String              @id @default(uuid()) @db.Uuid
+
+  // ----- MyCard 來源識別(填於第 2 / 9 步)-----
+  /// MyCard 卡號 / Billing 號 / CGM 號(防重複儲值的閘門)
+  mycardId            String              @unique @map("mycard_id") @db.VarChar(32)
+  /// MyCard 專案編號(MyCardProjectNo)— 對應到我方哪個面額 / 商品
+  mycardProjectNo     String?             @map("mycard_project_no") @db.VarChar(32)
+  /// 通路代碼(MyCardType:INGAME / COSTPOINT / FA2000000020…)
+  mycardType          String?             @map("mycard_type") @db.VarChar(16)
+  /// MyCard 交易序號(TradeSeq),第 2 步授權結果帶來,唯一
+  tradeSeq            String?             @unique @map("trade_seq") @db.VarChar(50)
+
+  // ----- 玩家(第 4-7 步驗證後關聯到 GameUser)-----
+  /// 驗證成功後關聯;PENDING_VERIFY 階段為 null
+  userId              String?             @map("user_id") @db.Uuid
+  /// 玩家提交的 UID(原樣記錄,避免 user_id null 時 trace 不到)
+  submittedUid        String?             @map("submitted_uid") @db.Char(16)
+
+  // ----- 金額 -----
+  amount              Decimal?            @db.Decimal(12, 2)
+  currency            String?             @db.VarChar(8)
+  /// MyCard 點數(若是會員扣點)
+  cardPoint           Int?                @map("card_point")
+
+  // ----- 狀態 -----
+  status              DirectTopupStatus
+
+  // ----- 結果代碼(回給 MyCard 的)-----
+  /// 帳密驗證結果:0=成功 / -1~-99=各種失敗
+  vresult             Int?
+  /// 儲值結果:0=成功 / -1=失敗 / -2=已重複儲值
+  sresult             Int?
+  /// 失敗訊息(英文,規格要求);SRESULT=-2 時要帶卡號
+  smessage            String?             @db.VarChar(500)
+
+  // ----- 驗證頁面 anti-CSRF / hand-off token -----
+  /// 第 2 步產生的一次性 token,第 3 步 GET 驗證頁時驗證,避免直接打 verify endpoint
+  verifyToken         String?             @unique @map("verify_token") @db.VarChar(64)
+  verifyTokenExpire   DateTime?           @map("verify_token_expire") @db.Timestamptz()
+
+  // ----- 原始 payload(對帳 / debug;90 天後依個資合規清空)-----
+  authRequestRaw      Json?               @map("auth_request_raw")
+  verifyRequestRaw    Json?               @map("verify_request_raw")
+  topupRequestRaw     Json?               @map("topup_request_raw")
+
+  // ----- 時間軸 -----
+  createdAt           DateTime            @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt           DateTime            @updatedAt @map("updated_at") @db.Timestamptz()
+  verifiedAt          DateTime?           @map("verified_at") @db.Timestamptz()
+  topupAt             DateTime?           @map("topup_at") @db.Timestamptz()
+  deliveredAt         DateTime?           @map("delivered_at") @db.Timestamptz()
+
+  user                User?               @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@map("direct_topup_attempts")
+}
+
+// ============================================================
+// Appendix A: ProductEffect JSON 結構
+// ============================================================
+//
+// products.effects 欄位 JSON 規格:
+//
+// {
+//   "effects": [
+//     { "type": "currency", "code": "DIAMOND", "amount": 150 },
+//     { "type": "item",     "code": "POTION_HP", "qty": 5 },
+//     { "type": "buff",     "code": "EXP_2X", "duration_seconds": 7200 }
+//   ],
+//   "mail": {
+//     "subject": "感謝您的購買 — 鑽石禮包",
+//     "body":    "感謝您支持 icedragon!",
+//     "expire_days": 30
+//   }
+// }
+//
+// effect.type ∈ {currency, item, buff}
+//   - currency: 加到 inventory_currency
+//   - item:     寄到遊戲信件,讓遊戲端處理
+//   - buff:     寄到遊戲信件,讓遊戲端處理
+//
+// ============================================================
+// Appendix B: 訂單狀態機
+// ============================================================
+//
+//                ┌──────────┐
+//   建立 ──────► │ PENDING  │  (剛產生)
+//                └─────┬────┘
+//                      │ AuthGlobal 成功
+//                      ▼
+//                ┌──────────┐
+//                │  AUTHED  │  (拿到 AuthCode)
+//                └─────┬────┘
+//                      │ 3.2 callback PayResult=3
+//                      ▼
+//                ┌──────────┐
+//                │   PAID   │  (用戶已付款)
+//                └─────┬────┘
+//                      │ PaymentConfirm 成功
+//                      ▼
+//                ┌──────────┐
+//                │CONFIRMED │  (請款完成)
+//                └─────┬────┘
+//                      │ 派發遊戲信件成功
+//                      ▼
+//                ┌──────────┐
+//                │DELIVERED │  (終態)
+//                └──────────┘
+//
+//   異常分支:
+//   - PENDING   → CANCELLED         玩家放棄 / Timeout
+//   - AUTHED    → FAILED            PayResult=0
+//   - CONFIRMED → DELIVERY_FAILED   遊戲 API 失敗(重試 3 次後)
+//
+// ============================================================
