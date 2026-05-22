@@ -122,6 +122,8 @@ export interface AdminProduct {
   effects: unknown;
   status: 'ACTIVE' | 'INACTIVE';
   sortOrder: number;
+  playfabItemId: string | null;
+  playfabStoreId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -147,6 +149,8 @@ export interface CreateProductInput {
   effects: Record<string, unknown>;
   status?: 'ACTIVE' | 'INACTIVE';
   sort_order?: number;
+  playfab_item_id?: string;
+  playfab_store_id?: string;
 }
 
 export async function createProduct(input: CreateProductInput): Promise<AdminProduct> {

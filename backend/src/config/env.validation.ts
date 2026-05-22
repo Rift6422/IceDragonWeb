@@ -214,6 +214,44 @@ export class EnvSchema {
   PLAYFAB_API_TIMEOUT_MS: number = 10000;
 
   // ============================================================
+  // Game Backend(遊戲端 Azure Functions / PlayFab CloudScript proxy)
+  //
+  // 由遊戲端提供:
+  //   - GAME_BACKEND_BASE_URL: 例 https://shindai-record-function-app.azurewebsites.net
+  //   - GAME_BACKEND_FUNCTION_CODE: Azure Function access key(query string `?code=`)
+  //   - GAME_BACKEND_STORE_ID:   web 端對應的 storeID,例 RMPacksStore
+  //
+  // 留空 → GameBackendService 進入 stub 模式(回空陣列),不擋現有流程。
+  // ============================================================
+
+  @IsOptional()
+  @IsUrl({ require_tld: false, require_protocol: true })
+  GAME_BACKEND_BASE_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  GAME_BACKEND_FUNCTION_CODE?: string;
+
+  /** Azure Function access key for /api/grantrmproduct(派發) */
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  GAME_BACKEND_GRANT_FUNCTION_CODE?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  GAME_BACKEND_STORE_ID?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1000)
+  @Max(30000)
+  GAME_BACKEND_TIMEOUT_MS: number = 5000;
+
+  // ============================================================
   // 觀測
   // ============================================================
 

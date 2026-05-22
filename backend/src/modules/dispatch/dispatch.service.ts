@@ -9,6 +9,12 @@ interface ProductEffectsJson {
   mail?: { subject?: string; body?: string; expire_days?: number };
 }
 
+interface ProductSnapshotShape {
+  effects?: ProductEffectsJson;
+  playfab_item_id?: string | null;
+  playfab_store_id?: string | null;
+}
+
 @Injectable()
 export class DispatchService {
   private readonly logger = new Logger(DispatchService.name);
@@ -61,7 +67,7 @@ export class DispatchService {
     }
 
     // 組 payload
-    const snapshot = order.productSnapshot as { effects?: ProductEffectsJson };
+    const snapshot = order.productSnapshot as ProductSnapshotShape;
     const productEffects = (snapshot.effects ?? {}) as ProductEffectsJson;
     const payload = {
       subject: productEffects.mail?.subject ?? `購買成功 - ${order.facTradeSeq}`,
@@ -83,6 +89,9 @@ export class DispatchService {
         orderId: order.id,
         facTradeSeq: order.facTradeSeq,
         uid: order.user.uid,
+        priceTwd: Math.round(Number(order.amount)),
+        playfabItemId: snapshot.playfab_item_id ?? null,
+        playfabStoreId: snapshot.playfab_store_id ?? null,
         payload,
       });
     } catch (err) {

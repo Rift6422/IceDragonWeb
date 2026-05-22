@@ -83,6 +83,10 @@ model Product {
   /// ProductEffect JSON — 派發效果與信件內容定義
   /// 範例見 schema 末尾「Appendix A: ProductEffect JSON」
   effects        Json
+  /// PlayFab Catalog itemId — 對應遊戲端商品識別。空 = 不從 PlayFab 查限購
+  playfabItemId  String?       @map("playfab_item_id")
+  /// PlayFab storeID — 限購查詢時帶入。空時用 GAME_BACKEND_STORE_ID 環境變數
+  playfabStoreId String?       @map("playfab_store_id")
   status         ProductStatus @default(ACTIVE)
   sortOrder      Int           @default(0) @map("sort_order")
   createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz()
@@ -91,6 +95,7 @@ model Product {
   orders Order[]
 
   @@index([status, sortOrder])
+  @@index([playfabItemId])
   @@map("products")
 }
 

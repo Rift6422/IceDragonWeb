@@ -65,6 +65,18 @@ export class CreateProductDto {
   @Min(0)
   @Max(99999)
   sort_order?: number;
+
+  /** PlayFab catalog itemId(限購查詢 + 派發識別用)*/
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  playfab_item_id?: string;
+
+  /** PlayFab storeID(空時 fallback 到 GAME_BACKEND_STORE_ID env)*/
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  playfab_store_id?: string;
 }
 
 export class UpdateProductDto {
@@ -113,6 +125,16 @@ export class UpdateProductDto {
   @Min(0)
   @Max(99999)
   sort_order?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  playfab_item_id?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  playfab_store_id?: string;
 }
 
 export class ListProductsDto {

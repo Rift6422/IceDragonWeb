@@ -13,6 +13,7 @@ import { DispatchModule } from './modules/dispatch/dispatch.module';
 import { CallbackModule } from './modules/callback/callback.module';
 import { ProductsModule } from './modules/products/products.module';
 import { MyCardDirectModule } from './modules/mycard-direct/mycard-direct.module';
+import { GameBackendModule } from './modules/game-backend/game-backend.module';
 
 // 解析靜態檔目錄:
 //   - prod (Docker):/app/public(Dockerfile COPY vite dist 進來)
@@ -56,6 +57,7 @@ const STATIC_ROOT = resolveStaticRoot();
       : []),
     PrismaModule,
     HealthModule,
+    GameBackendModule,
     MyCardModule,
     OrdersModule,
     DispatchModule,

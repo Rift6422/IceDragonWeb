@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MyCardCallbackController } from './mycard-callback.controller';
+import { MyCardTradeReturnController } from './mycard-trade-return.controller';
 import { MyCardCallbackService } from './mycard-callback.service';
 import { MyCardSourceGuard } from './guards/mycard-source.guard';
 import { OrdersModule } from '../orders/orders.module';
@@ -8,7 +9,7 @@ import { DispatchModule } from '../dispatch/dispatch.module';
 
 @Module({
   imports: [OrdersModule, MyCardModule, DispatchModule],
-  controllers: [MyCardCallbackController],
+  controllers: [MyCardCallbackController, MyCardTradeReturnController],
   providers: [MyCardCallbackService, MyCardSourceGuard],
 })
 export class CallbackModule {}

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { extractErrorMessage } from '@/api/client';
 import {
   createPlayerOrder,
@@ -12,14 +12,11 @@ import {
 import { isValidUid, normalizeUid, usePlayerStore } from '@/features/player/uid.store';
 
 /**
- * 玩家儲值單頁 — 對齊 shop.garena.tw 的 UX:
- *   1. UID 輸入(頁首,自動帶入 store 內存的 UID)
- *   2. 商品 tabs(超值禮包 / 鑽石)
- *   3. 商品卡 grid
- *   4. 點卡 → modal 顯示內容 + 立即購買 → POST /api/orders → 跳 MyCard
+ * 玩家儲值兩段式流程:
+ *   Stage 1:LoginScreen — 沒登入時的 UID 輸入閘門
+ *   Stage 2:ProductsScreen — 登入後的商品列表 + modal + 購買流程
  *
- * 沒 UID 就不能買 → 點購買時 highlight 輸入框並 scroll,不再強制 redirect。
- * UID 寫入 localStorage 持久化,下次回來自動填入。
+ * Deep link `/?uid=...&item=...` 會自動 setIdentity + 後續開 modal。
  */
 
 const TAB_LABELS: Record<ProductCategory, string> = {
@@ -30,7 +27,7 @@ const TAB_LABELS: Record<ProductCategory, string> = {
 const TAB_ORDER: ProductCategory[] = ['BUNDLE', 'CURRENCY'];
 
 const EFFECT_FALLBACK_NAMES: Record<string, string> = {
-  DIAMOND: '啟源石', // 內部 code 維持 DIAMOND 為穩定識別,顯示名統一改為啟源石
+  DIAMOND: '啟源石',
   STONE: '啟源石',
   CRYSTAL: '源結晶',
 };
@@ -42,13 +39,6 @@ function effectAmount(e: ProductEffect): number {
   return e.amount ?? e.qty ?? 0;
 }
 
-/**
- * icon 系統:支援兩種型態,後台輸入哪種就 render 哪種。
- *   - 圖片(以 `/` 或 `http(s)://` 開頭)→ 用 <img> render
- *   - 其他字串(通常是 emoji)→ 用文字 render(沿用舊行為,向下相容)
- *
- * fallback 用 demo 圖(在 `frontend/public/icons/` 下,跟著 vite build 進 Docker)。
- */
 const DEFAULT_BUNDLE_ICON = '/icons/bundle-default.jpg';
 const DEFAULT_CURRENCY_ICON = '/icons/stone-default.jpg';
 
@@ -80,26 +70,19 @@ function IconView({
         className="object-contain"
         style={{ imageRendering: 'pixelated', width: px, height: px }}
         onError={(e) => {
-          // 圖片載不到就降級成 emoji 預設
           (e.currentTarget as HTMLImageElement).style.display = 'none';
         }}
       />
     );
   }
-  // 文字 / emoji
   return <span className={size === 'modal' ? 'text-7xl' : 'text-5xl'}>{icon}</span>;
 }
 
+// ============================================================
+// PlayerHomePage — 登入閘門
+// ============================================================
+
 export function PlayerHomePage() {
-  /**
-   * Deep link 支援:URL 可帶 `?uid=...&item=...` 預填 + 自動開 modal。
-   *
-   *   /?uid=E9E3E1A9071AF9DC                   ← 只預填 UID
-   *   /?item=BUNDLE_VALUE_CHAR                  ← 只開特定商品 modal
-   *   /?uid=...&item=BUNDLE_VALUE_CHAR          ← UID + 商品都預填,玩家進場直接付款
-   *
-   * UID 也吃 ?itemId= 作為 alias(部分行銷工具會用 camelCase)。
-   */
   const [searchParams] = useSearchParams();
   const deepLinkUidRaw = (searchParams.get('uid') ?? '').toUpperCase();
   const deepLinkUid = /^[0-9A-F]{16}$/.test(deepLinkUidRaw) ? deepLinkUidRaw : '';
@@ -108,26 +91,187 @@ export function PlayerHomePage() {
     searchParams.get('itemId') ??
     searchParams.get('itemid') ??
     ''
-  )
-    .toUpperCase();
+  ).toUpperCase();
+  /** ?paid={FacTradeSeq} = 玩家剛付完款從 MyCard 返回,要刷新限購狀態 */
+  const paidFacTradeSeq = searchParams.get('paid') ?? '';
 
-  const { uid: storedUid, email, setIdentity } = usePlayerStore();
-  // UID 優先順序:URL > localStorage > 空
-  const [uidInput, setUidInput] = useState(deepLinkUid || storedUid || '');
-  const [uidError, setUidError] = useState<string | null>(null);
+  const { uid: storedUid, email, setIdentity, clear } = usePlayerStore();
+
+  // Deep link UID 自動登入(只一次,且 store 內沒有相同 UID 時)
+  const autoLoginRef = useRef(false);
+  useEffect(() => {
+    if (autoLoginRef.current) return;
+    if (deepLinkUid && deepLinkUid !== storedUid) {
+      setIdentity(deepLinkUid);
+      autoLoginRef.current = true;
+    }
+  }, [deepLinkUid, storedUid, setIdentity]);
+
+  const loggedIn = !!storedUid && isValidUid(storedUid);
+
+  if (!loggedIn) {
+    return <LoginScreen onLogin={(uid) => setIdentity(uid)} />;
+  }
+
+  return (
+    <ProductsScreen
+      uid={storedUid!}
+      email={email}
+      deepLinkItem={deepLinkItem}
+      paidFacTradeSeq={paidFacTradeSeq}
+      onChangeUid={clear}
+    />
+  );
+}
+
+// ============================================================
+// LoginScreen
+// ============================================================
+
+function LoginScreen({ onLogin }: { onLogin: (uid: string) => void }) {
+  const [input, setInput] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = () => {
+    const normalized = normalizeUid(input);
+    if (!isValidUid(normalized)) {
+      setError('UID 必須是 16 碼英數(0-9, A-F)');
+      return;
+    }
+    setError(null);
+    onLogin(normalized);
+  };
+
+  return (
+    <div className="mx-auto flex min-h-[85vh] max-w-md flex-col items-center justify-center px-4 py-6">
+      <div className="mb-6 flex items-center gap-3 text-center">
+        <img
+          src="/icons/icedragon-shop.webp"
+          alt="冰龍遊戲"
+          className="h-16 w-16 flex-shrink-0 rounded-lg"
+          style={{ imageRendering: 'pixelated' }}
+        />
+        <h1 className="text-xl font-bold leading-tight text-slate-900 sm:text-2xl">
+          冰龍遊戲<br className="sm:hidden" />
+          <span className="block sm:inline sm:ml-1">官方儲值中心</span>
+        </h1>
+      </div>
+
+      <div className="w-full rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <h2 className="mb-1 text-base font-semibold text-slate-900">
+          請輸入遊戲 UID
+        </h2>
+        <p className="mb-4 text-xs text-slate-500">
+          UID 可在遊戲設定畫面複製,輸入後將依據此帳號顯示對應的禮包剩餘購買次數
+        </p>
+
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value);
+            if (error) setError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') submit();
+          }}
+          placeholder="E9E3E1A9071AF9DC"
+          maxLength={16}
+          inputMode="text"
+          autoCapitalize="characters"
+          autoFocus
+          className={
+            'input w-full font-mono uppercase tracking-wider ' +
+            (error ? 'border-rose-400 ring-2 ring-rose-200' : '')
+          }
+          autoComplete="off"
+        />
+        {error && <p className="mt-2 text-sm text-rose-600">{error}</p>}
+
+        <button
+          onClick={submit}
+          className="btn-primary mt-4 w-full py-3 text-base"
+        >
+          進入儲值中心
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// ProductsScreen
+// ============================================================
+
+function ProductsScreen({
+  uid,
+  email,
+  deepLinkItem,
+  paidFacTradeSeq,
+  onChangeUid,
+}: {
+  uid: string;
+  email: string | null;
+  deepLinkItem: string;
+  paidFacTradeSeq: string;
+  onChangeUid: () => void;
+}) {
   const [tab, setTab] = useState<ProductCategory>('BUNDLE');
   const [selected, setSelected] = useState<PublicProduct | null>(null);
-  const uidInputRef = useRef<HTMLInputElement>(null);
-  // 確保 deep link 只自動開一次 modal,玩家手動關掉就不再自動開
+  const [, setSearchParams] = useSearchParams();
   const deepLinkOpenedRef = useRef(false);
+  const refreshAfterPayRef = useRef(false);
+  const queryClient = useQueryClient();
+
+  // 「剛付完款」流程
+  // ─────────────────────────────────────────────────────────
+  // 玩家在 MyCard 點「返回商家」→ 後端 GET /api/mycard/trade-result
+  // 302 導回 /?paid={facTradeSeq}。這裡攔到 ?paid= 後:
+  //   1. 顯示成功 banner(2 秒)
+  //   2. 等遊戲端 grantrmproduct 完成(我方 callback → dispatch → 派發),
+  //      預估 1-2 秒;先 invalidate 立刻撈一次,3 秒後再撈一次保底
+  //   3. 把 ?paid= 從 URL 拿掉,避免重整又觸發一次
+  const [showPaidBanner, setShowPaidBanner] = useState(false);
+  useEffect(() => {
+    if (refreshAfterPayRef.current) return;
+    if (!paidFacTradeSeq) return;
+    refreshAfterPayRef.current = true;
+    setShowPaidBanner(true);
+
+    // 第一次刷:幾乎立即(派發可能還沒跑完,但先試)
+    queryClient.invalidateQueries({ queryKey: ['player', 'products', uid] });
+
+    // 第二次刷:3 秒後(讓派發有時間 commit)
+    const refetchTimer = setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ['player', 'products', uid] });
+    }, 3000);
+
+    // 5 秒後收起 banner
+    const bannerTimer = setTimeout(() => setShowPaidBanner(false), 5000);
+
+    // 把 ?paid= 從 URL 移除(其他 params 保留)
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('paid');
+        return next;
+      },
+      { replace: true },
+    );
+
+    return () => {
+      clearTimeout(refetchTimer);
+      clearTimeout(bannerTimer);
+    };
+  }, [paidFacTradeSeq, queryClient, setSearchParams, uid]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['player', 'products'],
-    queryFn: fetchPlayerProducts,
-    staleTime: 30_000,
+    queryKey: ['player', 'products', uid],
+    queryFn: () => fetchPlayerProducts(uid),
+    staleTime: 5_000, // 短快取:限購狀態要新鮮
   });
 
-  // Deep link:商品載入後,若 URL 有 item 且在 ACTIVE 清單裡,自動切 tab + 開 modal
+  // Deep link item:自動切 tab + 開 modal(只一次)
   useEffect(() => {
     if (deepLinkOpenedRef.current) return;
     if (!deepLinkItem || !data?.items) return;
@@ -146,82 +290,60 @@ export function PlayerHomePage() {
   }, [data]);
 
   const purchase = useMutation({
-    mutationFn: (productCode: string) => {
-      const normalized = normalizeUid(uidInput);
-      if (!isValidUid(normalized)) {
-        return Promise.reject(new Error('UID 必須是 16 碼英數(0-9, A-F)'));
-      }
-      setIdentity(normalized);
-      return createPlayerOrder({
-        uid: normalized,
-        productCode,
-        email: email ?? undefined,
-      });
-    },
+    mutationFn: (productCode: string) =>
+      createPlayerOrder({ uid, productCode, email: email ?? undefined }),
     onSuccess: (res) => {
       window.location.href = res.redirect_url;
     },
   });
 
-  const tryPurchase = (product: PublicProduct) => {
-    const normalized = normalizeUid(uidInput);
-    if (!isValidUid(normalized)) {
-      setUidError('請先填入正確的遊戲 UID(16 碼 0-9 / A-F)');
-      uidInputRef.current?.focus();
-      uidInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
-    }
-    setUidError(null);
-    purchase.mutate(product.code);
-  };
-
   return (
     <div className="mx-auto max-w-5xl px-3 py-4 sm:px-6 sm:py-6">
-      {/* hero banner — RWD:手機 48px icon + 18px title;平板/桌機 64px + 24-30px */}
+      {/* Header — UID 顯示 + 更換按鈕 */}
       <section className="mb-4 overflow-hidden rounded-lg bg-gradient-to-r from-brand-600 to-brand-800 p-4 text-white shadow-lg sm:mb-6 sm:rounded-xl sm:p-6">
-        <div className="flex items-center gap-3 sm:gap-4">
-          <img
-            src="/icons/icedragon-shop.webp"
-            alt="冰龍遊戲"
-            className="h-12 w-12 rounded-lg bg-white/10 p-1 sm:h-16 sm:w-16"
-            style={{ imageRendering: 'pixelated' }}
-          />
-          <h1 className="text-lg font-bold leading-tight sm:text-2xl md:text-3xl">
-            冰龍遊戲 官方儲值中心
-          </h1>
+        <div className="flex items-center justify-between gap-3 sm:gap-4">
+          <div className="flex min-w-0 items-center gap-3 sm:gap-4">
+            <img
+              src="/icons/icedragon-shop.webp"
+              alt="冰龍遊戲"
+              className="h-12 w-12 flex-shrink-0 rounded-lg bg-white/10 p-1 sm:h-16 sm:w-16"
+              style={{ imageRendering: 'pixelated' }}
+            />
+            <div className="min-w-0">
+              <h1 className="truncate text-base font-bold leading-tight sm:text-2xl md:text-3xl">
+                冰龍遊戲 官方儲值中心
+              </h1>
+              <p className="mt-0.5 truncate text-xs text-white/80 sm:text-sm">
+                <span className="opacity-70">UID:</span>{' '}
+                <span className="font-mono">{uid}</span>
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onChangeUid}
+            className="flex-shrink-0 rounded border border-white/30 px-2.5 py-1.5 text-xs font-medium text-white/90 transition-colors hover:bg-white/10 sm:px-3 sm:py-2 sm:text-sm"
+          >
+            更換 UID
+          </button>
         </div>
       </section>
 
-      {/* UID 輸入 */}
-      <section className="mb-4 rounded-lg border border-slate-200 bg-white p-3 shadow-sm sm:mb-6 sm:p-4">
-        <label htmlFor="player-uid" className="label mb-2 block">
-          1. 輸入遊戲 UID
-        </label>
-        <input
-          id="player-uid"
-          ref={uidInputRef}
-          type="text"
-          value={uidInput}
-          onChange={(e) => {
-            setUidInput(e.target.value);
-            if (uidError) setUidError(null);
-          }}
-          placeholder="E9E3E1A9071AF9DC"
-          maxLength={16}
-          inputMode="text"
-          autoCapitalize="characters"
-          className={
-            'input w-full font-mono uppercase tracking-wider ' +
-            (uidError ? 'border-rose-400 ring-2 ring-rose-200' : '')
-          }
-          autoComplete="off"
-        />
-        {uidError && <p className="mt-2 text-sm text-rose-600">{uidError}</p>}
-      </section>
+      {/* 付款成功 banner — 從 MyCard 返回時顯示 */}
+      {showPaidBanner && (
+        <div className="mb-4 flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 sm:items-center">
+          <span className="text-xl leading-none">✓</span>
+          <div className="flex-1">
+            <div className="font-semibold">付款完成</div>
+            <div className="text-xs text-emerald-700">
+              商品正在派發到您的遊戲信箱,限購狀態即將更新...
+            </div>
+          </div>
+        </div>
+      )}
 
-      {/* 商品分類 tabs — 手機橫向 scroll 不卡 */}
+      {/* 商品分類 tabs */}
       <section className="mb-3">
-        <h2 className="label mb-2 block">2. 選擇商品</h2>
+        <h2 className="label mb-2 block">選擇商品</h2>
         <div
           className="-mx-1 flex gap-1 overflow-x-auto border-b border-slate-200 px-1"
           role="tablist"
@@ -250,7 +372,7 @@ export function PlayerHomePage() {
         </div>
       </section>
 
-      {/* 商品 grid — 手機 2 / 平板 3 / 桌機 4 */}
+      {/* 商品 grid */}
       {isLoading ? (
         <div className="card">載入中…</div>
       ) : error ? (
@@ -272,8 +394,7 @@ export function PlayerHomePage() {
           product={selected}
           purchasing={purchase.isPending}
           purchaseError={purchase.error ? extractErrorMessage(purchase.error) : null}
-          uidMissing={!isValidUid(normalizeUid(uidInput))}
-          onPurchase={() => tryPurchase(selected)}
+          onPurchase={() => purchase.mutate(selected.code)}
           onClose={() => {
             if (!purchase.isPending) {
               setSelected(null);
@@ -286,26 +407,48 @@ export function PlayerHomePage() {
   );
 }
 
-// ------------------------------------------------------------
-// Components
-// ------------------------------------------------------------
+// ============================================================
+// ProductCard
+// ============================================================
 
 function ProductCard({ product, onClick }: { product: PublicProduct; onClick: () => void }) {
   const icon = productIcon(product);
+  const limit = product.limitation;
+  const soldOut = !!limit && limit.left_quantity <= 0;
+  const limitBadge = formatLimitBadge(product);
+
   return (
     <button
       onClick={onClick}
-      className="group flex min-h-[180px] flex-col rounded-lg border border-slate-200 bg-white p-2.5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand-400 hover:shadow-md active:scale-[0.98] sm:min-h-[200px] sm:p-3"
+      disabled={soldOut}
+      className={
+        'group flex min-h-[180px] flex-col rounded-lg border bg-white p-2.5 text-left shadow-sm transition-all sm:min-h-[200px] sm:p-3 ' +
+        (soldOut
+          ? 'cursor-not-allowed border-slate-200 opacity-60'
+          : 'border-slate-200 hover:-translate-y-0.5 hover:border-brand-400 hover:shadow-md active:scale-[0.98]')
+      }
     >
       <div className="mb-1 line-clamp-1 text-xs font-semibold text-slate-800 sm:text-sm">
         {product.name_display}
       </div>
-      <div className="flex flex-1 items-center justify-center py-2 sm:py-3">
+      <div className="relative flex flex-1 items-center justify-center py-2 sm:py-3">
         <IconView icon={icon} alt={product.name_display} size="card" />
+        {soldOut && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="rounded-full bg-slate-900/80 px-3 py-1 text-xs font-bold text-white">
+              已售完
+            </span>
+          </div>
+        )}
       </div>
-      {product.purchase_limit_label && (
-        <div className="mb-1 self-start rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 sm:px-2 sm:text-xs">
-          {product.purchase_limit_label}
+      {limitBadge && (
+        <div
+          className={
+            'mb-1 self-start rounded px-1.5 py-0.5 text-[10px] font-medium sm:px-2 sm:text-xs ' +
+            (soldOut ? 'bg-slate-200 text-slate-500' : 'bg-amber-100 text-amber-700')
+          }
+        >
+          {limitBadge}
         </div>
       )}
       <div className="mt-1 text-right text-base font-bold text-brand-700 sm:text-lg">
@@ -315,26 +458,71 @@ function ProductCard({ product, onClick }: { product: PublicProduct; onClick: ()
   );
 }
 
+// ============================================================
+// 限購 badge 文案
+// ============================================================
+
+/**
+ * 規則:
+ *   ALL_TIME → `限購 N/M`
+ *   DAY      → `每日限購 N/M`
+ *   WEEK     → `每週限購 N/M`
+ *   MONTH    → `每月限購 N/M`
+ *   YEAR     → `每年限購 N/M`
+ *
+ * 沒 PlayFab 限購資訊(無 itemId 或 API 失敗)→ fallback 到 admin 後台手打的純文字 label
+ */
+function formatLimitBadge(product: PublicProduct): string | null {
+  const lim = product.limitation;
+  if (lim) {
+    const prefix = periodPrefix(lim.limit_period);
+    return `${prefix}限購 ${lim.left_quantity}/${lim.max_quantity}`;
+  }
+  return product.purchase_limit_label || null;
+}
+
+function periodPrefix(p: NonNullable<PublicProduct['limitation']>['limit_period']): string {
+  switch (p) {
+    case 'DAY': return '每日';
+    case 'WEEK': return '每週';
+    case 'MONTH': return '每月';
+    case 'YEAR': return '每年';
+    case 'ALL_TIME': return '';
+    default: return '';
+  }
+}
+
+// reset 時間用 UTC,顯示給玩家轉成台北時間
+function formatResetAt(iso: string): string {
+  const d = new Date(iso);
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  const hh = d.getHours().toString().padStart(2, '0');
+  return `${m}/${day} ${hh}:00`;
+}
+
+// ============================================================
+// ProductDetailModal
+// ============================================================
+
 function ProductDetailModal({
   product,
   purchasing,
   purchaseError,
-  uidMissing,
   onPurchase,
   onClose,
 }: {
   product: PublicProduct;
   purchasing: boolean;
   purchaseError: string | null;
-  uidMissing: boolean;
   onPurchase: () => void;
   onClose: () => void;
 }) {
   const effects = product.effects.effects ?? [];
   const icon = productIcon(product);
+  const soldOut = !!product.limitation && product.limitation.left_quantity <= 0;
 
   return (
-    // 手機:底部彈出 bottom sheet 風(items-end + rounded-t-2xl);桌機:置中 modal
     <div
       className="fixed inset-0 z-50 flex items-end justify-center overflow-y-auto bg-slate-900/60 sm:items-center sm:px-4 sm:py-8"
       onClick={onClose}
@@ -357,11 +545,27 @@ function ProductDetailModal({
           <h2 className="text-base font-bold text-slate-900 sm:text-lg">
             {product.name_display}
           </h2>
-          {product.purchase_limit_label && (
-            <div className="mt-1 inline-block rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
-              {product.purchase_limit_label}
-            </div>
-          )}
+          {(() => {
+            const badge = formatLimitBadge(product);
+            if (!badge) return null;
+            return (
+              <div
+                className={
+                  'mt-1 inline-block rounded px-2 py-0.5 text-xs font-medium ' +
+                  (soldOut
+                    ? 'bg-slate-200 text-slate-500'
+                    : 'bg-amber-100 text-amber-700')
+                }
+              >
+                {badge}
+                {product.limitation?.reset_at && !soldOut && (
+                  <span className="ml-1 text-amber-600">
+                    · {formatResetAt(product.limitation.reset_at)} 重置
+                  </span>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         <div className="space-y-3 px-4 py-4 sm:space-y-4 sm:px-5 sm:py-5">
@@ -387,12 +591,6 @@ function ProductDetailModal({
             )}
           </div>
 
-          {uidMissing && (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              請先在上方填入遊戲 UID 才能購買
-            </div>
-          )}
-
           {purchaseError && (
             <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
               建單失敗:{purchaseError}
@@ -403,10 +601,14 @@ function ProductDetailModal({
         <div className="sticky bottom-0 border-t border-slate-200 bg-slate-50 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-5 sm:py-4">
           <button
             onClick={onPurchase}
-            disabled={purchasing}
+            disabled={purchasing || soldOut}
             className="btn-primary w-full py-3 text-base sm:py-2.5"
           >
-            {purchasing ? '處理中…' : `立即購買  NT$ ${product.amount}`}
+            {soldOut
+              ? '已達購買上限'
+              : purchasing
+              ? '處理中…'
+              : `立即購買  NT$ ${product.amount}`}
           </button>
           <p className="mt-2 text-center text-xs text-slate-500">
             點擊購買將導向 MyCard 付款頁

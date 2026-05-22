@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { MyCardApiService } from '../mycard/api-client/mycard-api.service';
+import { GameBackendService } from '../game-backend/game-backend.service';
 import { generateFacTradeSeq } from './fac-trade-seq.util';
 import { OrderStateService } from './order-state.service';
 import type { CreateOrderDto } from './dto/create-order.dto';
@@ -41,6 +42,7 @@ export class OrdersService {
     private readonly mycard: MyCardApiService,
     private readonly state: OrderStateService,
     private readonly config: ConfigService,
+    private readonly gameBackend: GameBackendService,
   ) {}
 
   // ============================================================
@@ -77,6 +79,25 @@ export class OrdersService {
     }
     if (product.status !== 'ACTIVE') {
       throw new BadRequestException(`商品已下架:${dto.productCode}`);
+    }
+
+    // (2.5) 限購 pre-check(若該商品有 PlayFab itemId)
+    //
+    // 找不到 itemID(回 null)= 沒在 GameBackend 設限 → 允許購買
+    // left_quantity <= 0 → 拒絕,前端顯示已達上限
+    // GameBackend 失敗時 service 內部會 swallow + 回空 → 不擋主流程,信任派發端最後再擋
+    if (product.playfabItemId) {
+      const limit = await this.gameBackend.getItemLimitation(
+        uid,
+        product.playfabItemId,
+        product.playfabStoreId ?? undefined,
+      );
+      if (limit && limit.left_quantity <= 0) {
+        throw new BadRequestException(
+          `此商品已達購買上限(${limit.max_quantity}/${limit.max_quantity})` +
+            (limit.reset_at ? `,將於 ${limit.reset_at} 重置` : ''),
+        );
+      }
     }
 
     // (3) 產 FacTradeSeq + 建單(PENDING)
@@ -258,6 +279,8 @@ export class OrdersService {
     amount: { toString(): string };
     currency: string;
     effects: unknown;
+    playfabItemId: string | null;
+    playfabStoreId: string | null;
   }): Record<string, unknown> {
     return {
       code: product.code,
@@ -266,6 +289,8 @@ export class OrdersService {
       amount: product.amount.toString(),
       currency: product.currency,
       effects: product.effects,
+      playfab_item_id: product.playfabItemId,
+      playfab_store_id: product.playfabStoreId,
       snapshot_at: new Date().toISOString(),
     };
   }

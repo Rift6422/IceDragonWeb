@@ -46,6 +46,8 @@ export class AdminProductsService {
         effects: dto.effects as Prisma.InputJsonValue,
         status: dto.status ?? ProductStatus.ACTIVE,
         sortOrder: dto.sort_order ?? 0,
+        playfabItemId: dto.playfab_item_id ?? null,
+        playfabStoreId: dto.playfab_store_id ?? null,
       },
     });
   }
@@ -64,6 +66,8 @@ export class AdminProductsService {
         effects: dto.effects as Prisma.InputJsonValue | undefined,
         status: dto.status,
         sortOrder: dto.sort_order,
+        playfabItemId: dto.playfab_item_id,
+        playfabStoreId: dto.playfab_store_id,
       },
     });
   }

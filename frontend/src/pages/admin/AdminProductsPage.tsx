@@ -42,6 +42,8 @@ interface ProductFormState {
   mail_subject: string;
   mail_body: string;
   mail_expire_days: string;
+  playfab_item_id: string;
+  playfab_store_id: string;
 }
 
 const EMPTY_FORM: ProductFormState = {
@@ -57,6 +59,8 @@ const EMPTY_FORM: ProductFormState = {
   mail_subject: '',
   mail_body: '感謝您支持 icedragon!',
   mail_expire_days: '30',
+  playfab_item_id: '',
+  playfab_store_id: '',
 };
 
 const ICON_EMOJI_PRESETS = ['🎁', '🌟', '⚔️', '🎴', '📅', '🗓️', '📆', '🔮', '💎', '🏆', '👑', '⭐'];
@@ -394,6 +398,8 @@ function ProductFormModal({
       sort_order: parseInt(form.sort_order, 10) || 0,
       status: form.status,
       effects: effectsJson,
+      playfab_item_id: form.playfab_item_id.trim() || undefined,
+      playfab_store_id: form.playfab_store_id.trim() || undefined,
     });
   };
 
@@ -570,6 +576,38 @@ function ProductFormModal({
                 placeholder="限購 1/1"
               />
             </Field>
+          </Section>
+
+          {/* PlayFab 對應 */}
+          <Section title="PlayFab 對應(限購由遊戲端控管)">
+            <div className="grid grid-cols-2 gap-3">
+              <Field
+                label="PlayFab itemId"
+                hint="對應 PlayFab catalog item。空 = 不查限購,所有玩家都能買"
+              >
+                <input
+                  type="text"
+                  value={form.playfab_item_id}
+                  onChange={(e) => update('playfab_item_id', e.target.value)}
+                  className="input font-mono"
+                  placeholder="all_time_pack_1"
+                  maxLength={64}
+                />
+              </Field>
+              <Field
+                label="PlayFab storeID"
+                hint="空 = 用環境變數預設(GAME_BACKEND_STORE_ID)"
+              >
+                <input
+                  type="text"
+                  value={form.playfab_store_id}
+                  onChange={(e) => update('playfab_store_id', e.target.value)}
+                  className="input font-mono"
+                  placeholder="RMPacksStore"
+                  maxLength={64}
+                />
+              </Field>
+            </div>
           </Section>
 
           {/* 包含內容 */}
@@ -764,5 +802,7 @@ function productToForm(p: AdminProduct): ProductFormState {
     mail_subject: e.mail?.subject ?? '',
     mail_body: e.mail?.body ?? '',
     mail_expire_days: String(e.mail?.expire_days ?? 30),
+    playfab_item_id: p.playfabItemId ?? '',
+    playfab_store_id: p.playfabStoreId ?? '',
   };
 }

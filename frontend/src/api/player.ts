@@ -22,6 +22,18 @@ export interface ProductEffectsJson {
   icon?: string;
 }
 
+export type LimitPeriod = 'DAY' | 'WEEK' | 'MONTH' | 'YEAR' | 'ALL_TIME';
+
+export interface ItemLimitation {
+  store_id: string;
+  item_id: string;
+  limit_period: LimitPeriod;
+  max_quantity: number;
+  left_quantity: number;
+  /** ISO 8601 UTC,或 null(AllTime / 無重置) */
+  reset_at: string | null;
+}
+
 export interface PublicProduct {
   id: string;
   code: string;
@@ -32,6 +44,10 @@ export interface PublicProduct {
   sort_order: number;
   category: ProductCategory;
   purchase_limit_label?: string | null;
+  /** PlayFab itemId(若有設,代表有限購) */
+  playfab_item_id?: string | null;
+  /** 限購狀態 — 只在 fetch 帶 uid 時填入 */
+  limitation?: ItemLimitation | null;
 }
 
 export interface PublicProductsResponse {
@@ -39,8 +55,9 @@ export interface PublicProductsResponse {
   items: PublicProduct[];
 }
 
-export async function fetchPlayerProducts(): Promise<PublicProductsResponse> {
-  const { data } = await api.get<PublicProductsResponse>('/api/products');
+export async function fetchPlayerProducts(uid?: string): Promise<PublicProductsResponse> {
+  const params = uid ? { uid } : undefined;
+  const { data } = await api.get<PublicProductsResponse>('/api/products', { params });
   return data;
 }
 
