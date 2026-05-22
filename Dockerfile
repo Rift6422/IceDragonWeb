@@ -18,6 +18,11 @@
 # ---------- Stage 1: Frontend (Vite) ----------
 FROM node:20-alpine AS frontend-builder
 
+# Zeabur / 其他 PaaS 會把 NODE_ENV=production 帶進 build context,
+# 導致 npm ci 自動 omit devDependencies(typescript / vite 都 build 階段需要)
+# → 顯式 override 成 development 確保 build 階段 devDeps 一定裝
+ENV NODE_ENV=development
+
 WORKDIR /app/frontend
 
 # Build-time 環境變數(VITE_* 會 inline 到 bundle,啟動後改不了)
@@ -27,8 +32,9 @@ ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
     VITE_SENTRY_DSN=$VITE_SENTRY_DSN
 
 # 先 copy package files 利用 layer cache
+# --include=dev 雙保險:就算上游 NODE_ENV 又被覆寫,也仍裝 devDeps
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+RUN npm ci --include=dev --no-audit --no-fund || npm install --include=dev --no-audit --no-fund
 
 COPY frontend/ ./
 RUN npm run build
@@ -37,6 +43,9 @@ RUN npm run build
 # ---------- Stage 2: Backend (Nest) ----------
 FROM node:20-alpine AS backend-builder
 
+# 同上,build 階段需要 devDeps(nest cli / typescript / @types/*)
+ENV NODE_ENV=development
+
 # Prisma 在 Alpine 需要 libssl
 RUN apk add --no-cache openssl
 
@@ -44,7 +53,7 @@ WORKDIR /app/backend
 
 COPY backend/package.json backend/package-lock.json* ./
 COPY backend/prisma ./prisma
-RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+RUN npm ci --include=dev --no-audit --no-fund || npm install --include=dev --no-audit --no-fund
 RUN npx prisma generate
 
 COPY backend/ ./
