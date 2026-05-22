@@ -61,11 +61,19 @@ export class OrdersService {
   async create(dto: CreateOrderDto): Promise<CreateOrderResult> {
     const uid = dto.uid.toUpperCase();
 
-    // (1) GameUser 必須存在(決議 #A5,Web 不主動建 GameUser)
-    const user = await this.prisma.user.findUnique({ where: { uid } });
-    if (!user) {
-      throw new BadRequestException(`UID ${uid} 不存在,請先在遊戲端建立帳號`);
-    }
+    // (1) 找 GameUser,沒有就自動建立
+    //
+    // 設計變更(2026-05-23):原本決議 #A5「Web 不主動建 GameUser」要求遊戲端
+    // 推 UID 給我們,但實務上遊戲端在 PlayFab 維護玩家,我們這邊 users 表
+    // 只是訂單 FK / 對帳用。玩家 UID 真偽改由下游 GetStoreLimitations /
+    // grantrmproduct 把關;我們這邊不主動擋,讓玩家流程順暢。
+    //
+    // UID 格式驗證(16 碼大寫 hex)在 DTO 已做,亂打的進不到這裡。
+    const user = await this.prisma.user.upsert({
+      where: { uid },
+      update: {},
+      create: { uid, isActive: true },
+    });
     if (!user.isActive) {
       throw new BadRequestException(`UID ${uid} 帳號已停用`);
     }
