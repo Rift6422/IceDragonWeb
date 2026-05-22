@@ -32,17 +32,7 @@ export function PlayerLayout() {
             >
               商品
             </NavLink>
-            <NavLink
-              to="/orders"
-              className={({ isActive }) =>
-                'rounded px-1.5 py-1 transition-colors ' +
-                (isActive
-                  ? 'font-medium text-brand-700'
-                  : 'text-slate-600 hover:text-brand-600')
-              }
-            >
-              我的訂單
-            </NavLink>
+            {/* 我的訂單 暫時隱藏 — 等 UID 登入流程穩定後再放回 */}
           </nav>
         </div>
       </header>

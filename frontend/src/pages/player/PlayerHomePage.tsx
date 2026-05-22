@@ -313,13 +313,20 @@ function ProductsScreen({
     return init;
   }, [data]);
 
+  // redirecting:purchase 成功後保持 loading 直到 window.location 真正換頁
+  // (避免 onSuccess 跑完 → isPending = false → overlay 消失 → 0.x 秒後才導頁的閃爍)
+  const [redirecting, setRedirecting] = useState(false);
+
   const purchase = useMutation({
     mutationFn: (productCode: string) =>
       createPlayerOrder({ uid, productCode, email: email ?? undefined }),
     onSuccess: (res) => {
+      setRedirecting(true);
       window.location.href = res.redirect_url;
     },
   });
+
+  const showPurchaseOverlay = purchase.isPending || redirecting;
 
   return (
     <div className="mx-auto max-w-5xl px-3 py-4 sm:px-6 sm:py-6">
@@ -420,13 +427,50 @@ function ProductsScreen({
           purchaseError={purchase.error ? extractErrorMessage(purchase.error) : null}
           onPurchase={() => purchase.mutate(selected.code)}
           onClose={() => {
-            if (!purchase.isPending) {
+            if (!purchase.isPending && !redirecting) {
               setSelected(null);
               purchase.reset();
             }
           }}
         />
       )}
+
+      {/* 購買 loading overlay — 完全擋住 UI 直到跳轉 MyCard */}
+      {showPurchaseOverlay && <PurchaseLoadingOverlay />}
+    </div>
+  );
+}
+
+// ============================================================
+// PurchaseLoadingOverlay — 購買中全屏 loading
+// ============================================================
+
+/**
+ * 玩家點立即購買 → API 建單 → 拿到 MyCard URL → 跳轉
+ * 整段過程顯示全屏 loading,擋住所有 UI 互動,直到瀏覽器真的導頁離開。
+ *
+ * 設計要點:
+ *   - z-100 高於 modal 的 z-50,確保覆蓋整個畫面
+ *   - 沒有任何 onClick / 關閉按鈕,玩家無法關掉
+ *   - 文字明確告知「不要關閉視窗、不要重新整理」
+ */
+function PurchaseLoadingOverlay() {
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/85 px-4 backdrop-blur-sm">
+      <div className="flex w-full max-w-sm flex-col items-center gap-4 rounded-xl bg-white p-6 shadow-2xl">
+        <div className="h-12 w-12 animate-spin rounded-full border-4 border-brand-200 border-t-brand-600" />
+        <div className="text-center">
+          <div className="text-base font-semibold text-slate-900">
+            訂單建立中,請稍候
+          </div>
+          <p className="mt-1 text-sm text-slate-500">
+            正在為您建立訂單並跳轉至 MyCard 付款頁面
+          </p>
+          <p className="mt-2 text-xs text-amber-700">
+            ⚠️ 請勿關閉視窗或重新整理頁面
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
