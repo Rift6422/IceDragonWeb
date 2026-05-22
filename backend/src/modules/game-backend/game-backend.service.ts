@@ -118,6 +118,57 @@ export class GameBackendService implements OnModuleInit {
   }
 
   /**
+   * 用 GetStoreLimitations 反向驗證 UID 是否存在於 PlayFab。
+   *
+   * 規則:
+   *   - HTTP 200 + body.success = true  → UID 有效(PlayFab 找得到玩家)
+   *   - HTTP 200 + body.success = false → UID 不存在(PlayFab 回 ResourceNotFound)
+   *   - 其他(網路爆 / 4xx / 5xx)→ fail open(視為有效),避免遊戲端掛掉時封鎖所有玩家
+   *   - Stub mode(沒對接)→ fail open
+   *
+   * 失敗原因會用 reason 標出,給呼叫方判斷該怎麼回應。
+   */
+  async validatePlayer(
+    playerID: string,
+    storeID?: string,
+  ): Promise<{ valid: boolean; reason: 'OK' | 'NOT_FOUND' | 'BACKEND_DOWN' | 'STUB' }> {
+    if (this.stubMode || !this.http) {
+      return { valid: true, reason: 'STUB' };
+    }
+
+    const effectiveStoreID =
+      storeID ?? this.config.get<string>('GAME_BACKEND_STORE_ID') ?? 'RMPacksStore';
+
+    try {
+      const response = await this.http.post<GameBackendEnvelope>(
+        `/api/getstorelimitations?code=${encodeURIComponent(this.functionCode)}`,
+        {
+          storeID: effectiveStoreID,
+          playerID,
+          timeZone: GameBackendService.TAIPEI_TIMEZONE_MS,
+        },
+      );
+
+      if (response.status !== 200) {
+        this.logger.warn(`validatePlayer non-200 ${response.status} → fail open`);
+        return { valid: true, reason: 'BACKEND_DOWN' };
+      }
+
+      if (response.data?.success === true) {
+        return { valid: true, reason: 'OK' };
+      }
+
+      // success=false 才視為「UID 不存在」(配合 PlayFab ResourceNotFound)
+      this.logger.log(`validatePlayer rejected for ${playerID}: ${JSON.stringify(response.data).slice(0, 200)}`);
+      return { valid: false, reason: 'NOT_FOUND' };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`validatePlayer network error: ${msg} → fail open`);
+      return { valid: true, reason: 'BACKEND_DOWN' };
+    }
+  }
+
+  /**
    * 查單一商品的限購狀態 — 給建單前 pre-check 用。
    *
    * @returns null = 找不到該 itemID(代表沒限購 / 不在這 store)→ 視為「允許」

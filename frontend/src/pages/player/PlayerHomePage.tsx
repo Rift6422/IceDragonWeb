@@ -5,6 +5,7 @@ import { extractErrorMessage } from '@/api/client';
 import {
   createPlayerOrder,
   fetchPlayerProducts,
+  verifyPlayerUid,
   type ProductCategory,
   type ProductEffect,
   type PublicProduct,
@@ -132,6 +133,25 @@ function LoginScreen({ onLogin }: { onLogin: (uid: string) => void }) {
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
 
+  const verifyMut = useMutation({
+    mutationFn: (uid: string) => verifyPlayerUid(uid),
+    onSuccess: (result, uid) => {
+      if (result.valid) {
+        onLogin(uid);
+      } else {
+        setError(
+          result.reason === 'NOT_FOUND'
+            ? '此 UID 在遊戲端找不到,請確認 UID 是否正確'
+            : '驗證失敗,請稍後再試',
+        );
+      }
+    },
+    onError: (err) => {
+      // 網路 / server 錯,給友善訊息
+      setError(`連線失敗:${extractErrorMessage(err)}`);
+    },
+  });
+
   const submit = () => {
     const normalized = normalizeUid(input);
     if (!isValidUid(normalized)) {
@@ -139,8 +159,10 @@ function LoginScreen({ onLogin }: { onLogin: (uid: string) => void }) {
       return;
     }
     setError(null);
-    onLogin(normalized);
+    verifyMut.mutate(normalized);
   };
+
+  const submitting = verifyMut.isPending;
 
   return (
     <div className="mx-auto flex min-h-[85vh] max-w-md flex-col items-center justify-center px-4 py-6">
@@ -162,7 +184,7 @@ function LoginScreen({ onLogin }: { onLogin: (uid: string) => void }) {
           請輸入遊戲 UID
         </h2>
         <p className="mb-4 text-xs text-slate-500">
-          UID 可在遊戲設定畫面複製,輸入後將依據此帳號顯示對應的禮包剩餘購買次數
+          UID 可在遊戲設定畫面複製,輸入後將以此帳號驗證並顯示對應的禮包剩餘購買次數
         </p>
 
         <input
@@ -173,13 +195,14 @@ function LoginScreen({ onLogin }: { onLogin: (uid: string) => void }) {
             if (error) setError(null);
           }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') submit();
+            if (e.key === 'Enter' && !submitting) submit();
           }}
           placeholder="E9E3E1A9071AF9DC"
           maxLength={16}
           inputMode="text"
           autoCapitalize="characters"
           autoFocus
+          disabled={submitting}
           className={
             'input w-full font-mono uppercase tracking-wider ' +
             (error ? 'border-rose-400 ring-2 ring-rose-200' : '')
@@ -190,9 +213,10 @@ function LoginScreen({ onLogin }: { onLogin: (uid: string) => void }) {
 
         <button
           onClick={submit}
+          disabled={submitting}
           className="btn-primary mt-4 w-full py-3 text-base"
         >
-          進入儲值中心
+          {submitting ? '驗證中…' : '進入儲值中心'}
         </button>
       </div>
     </div>

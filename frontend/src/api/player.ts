@@ -62,6 +62,26 @@ export async function fetchPlayerProducts(uid?: string): Promise<PublicProductsR
 }
 
 // ============================================================
+// UID 登入驗證
+// ============================================================
+
+export interface VerifyUidResponse {
+  valid: boolean;
+  /**
+   * OK = PlayFab 認得;
+   * NOT_FOUND = PlayFab 回不存在,擋住;
+   * BACKEND_DOWN = 遊戲端掛了 / 沒對接,放行;
+   * STUB = 我方環境未設遊戲端 endpoint,放行
+   */
+  reason: 'OK' | 'NOT_FOUND' | 'BACKEND_DOWN' | 'STUB';
+}
+
+export async function verifyPlayerUid(uid: string): Promise<VerifyUidResponse> {
+  const { data } = await api.post<VerifyUidResponse>('/api/players/verify', { uid });
+  return data;
+}
+
+// ============================================================
 // 建單(玩家)
 // ============================================================
 
