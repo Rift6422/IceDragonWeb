@@ -101,8 +101,53 @@ export async function fetchOrders(query: ListOrdersQuery = {}): Promise<AdminOrd
   return data;
 }
 
-export async function fetchOrderDetail(id: string): Promise<unknown> {
-  const { data } = await api.get<unknown>(`/api/admin/orders/${id}`);
+export interface AdminOrderDetail {
+  id: string;
+  facTradeSeq: string;
+  status: string;
+  amount: string;
+  currency: string;
+  createdAt: string;
+  updatedAt: string;
+  authedAt: string | null;
+  paidAt: string | null;
+  confirmedAt: string | null;
+  deliveredAt: string | null;
+  failureReason: string | null;
+  productSnapshot: unknown;
+  user: { id: string; uid: string; email: string | null; displayName: string | null } | null;
+  product: {
+    id: string;
+    code: string;
+    nameDisplay: string;
+    nameInternal: string;
+    mycardItemCode: string | null;
+  } | null;
+  transaction: {
+    authCode: string | null;
+    tradeSeq: string | null;
+    mycardTradeNo: string | null;
+    paymentType: string | null;
+    payResult: number | null;
+  } | null;
+  callbackLogs?: unknown[];
+  statusHistory?: unknown[];
+  deliveryAttempts?: unknown[];
+}
+
+export async function fetchOrderDetail(id: string): Promise<AdminOrderDetail> {
+  const { data } = await api.get<AdminOrderDetail>(`/api/admin/orders/${id}`);
+  return data;
+}
+
+export interface RetryCallbackResponse {
+  ok: boolean;
+  status: string | null;
+  message: string;
+}
+
+export async function retryCallback(facTradeSeq: string): Promise<RetryCallbackResponse> {
+  const { data } = await api.post<RetryCallbackResponse>('/api/admin/orders/retry-callback', { facTradeSeq });
   return data;
 }
 

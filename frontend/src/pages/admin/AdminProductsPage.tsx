@@ -19,16 +19,6 @@ import { extractErrorMessage } from '@/api/client';
 //   - 信件:mail.subject / body / expire_days
 // ============================================================
 
-const EFFECT_TYPES = ['currency', 'item', 'buff'] as const;
-type EffectType = (typeof EFFECT_TYPES)[number];
-
-interface EffectRow {
-  type: EffectType;
-  code: string;
-  display_label: string;
-  amount: string;
-}
-
 interface ProductFormState {
   code: string;
   name_display: string;
@@ -38,10 +28,6 @@ interface ProductFormState {
   status: 'ACTIVE' | 'INACTIVE';
   icon: string;
   purchase_limit_label: string;
-  effects: EffectRow[];
-  mail_subject: string;
-  mail_body: string;
-  mail_expire_days: string;
   playfab_item_id: string;
   playfab_store_id: string;
 }
@@ -55,30 +41,9 @@ const EMPTY_FORM: ProductFormState = {
   status: 'ACTIVE',
   icon: '',
   purchase_limit_label: '',
-  effects: [{ type: 'currency', code: 'DIAMOND', display_label: '啟源石', amount: '' }],
-  mail_subject: '',
-  mail_body: '感謝您支持 icedragon!',
-  mail_expire_days: '30',
   playfab_item_id: '',
   playfab_store_id: '',
 };
-
-const ICON_EMOJI_PRESETS = ['🎁', '🌟', '⚔️', '🎴', '📅', '🗓️', '📆', '🔮', '💎', '🏆', '👑', '⭐'];
-
-/**
- * 圖片 preset:檔案放在 frontend/public/icons/,vite build 會打進 Docker image。
- * 後台填入這些路徑後,玩家前台會用 <img> render(自動偵測是路徑就 render 圖)。
- *
- * 加新圖片步驟:
- *   1. 圖檔丟進 `frontend/public/icons/`
- *   2. 在這個陣列 push 一行 { label, path }
- *   3. 重 build Docker image
- */
-const ICON_IMAGE_PRESETS: Array<{ label: string; path: string }> = [
-  { label: '禮包預設', path: '/icons/bundle-default.jpg' },
-  { label: '啟源石預設', path: '/icons/stone-default.jpg' },
-  { label: '商店 mascot', path: '/icons/icedragon-shop.webp' },
-];
 
 function isImageIcon(s: string): boolean {
   return s.startsWith('/') || s.startsWith('http://') || s.startsWith('https://');
@@ -259,9 +224,9 @@ export function AdminProductsPage() {
 
 function StatusBadge({ status }: { status: AdminProduct['status'] }) {
   return status === 'ACTIVE' ? (
-    <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">ACTIVE</span>
+    <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">啟用</span>
   ) : (
-    <span className="rounded bg-slate-200 px-2 py-0.5 text-xs text-slate-500">INACTIVE</span>
+    <span className="rounded bg-slate-200 px-2 py-0.5 text-xs text-slate-500">下架</span>
   );
 }
 
@@ -332,21 +297,6 @@ function ProductFormModal({
   const update = <K extends keyof ProductFormState>(k: K, v: ProductFormState[K]) =>
     setForm((s) => ({ ...s, [k]: v }));
 
-  const addEffect = () =>
-    setForm((s) => ({
-      ...s,
-      effects: [...s.effects, { type: 'currency', code: '', display_label: '', amount: '' }],
-    }));
-
-  const removeEffect = (i: number) =>
-    setForm((s) => ({ ...s, effects: s.effects.filter((_, idx) => idx !== i) }));
-
-  const updateEffect = (i: number, patch: Partial<EffectRow>) =>
-    setForm((s) => ({
-      ...s,
-      effects: s.effects.map((e, idx) => (idx === i ? { ...e, ...patch } : e)),
-    }));
-
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     setValidationErr(null);
@@ -363,32 +313,19 @@ function ProductFormModal({
       setValidationErr('金額格式錯誤');
       return;
     }
-    for (const [i, eff] of form.effects.entries()) {
-      if (!eff.code || !eff.display_label || !eff.amount) {
-        setValidationErr(`包含內容第 ${i + 1} 列:code、標籤、數量都要填`);
-        return;
-      }
-      if (!/^\d+$/.test(eff.amount)) {
-        setValidationErr(`包含內容第 ${i + 1} 列:數量必須是整數`);
-        return;
-      }
-    }
 
-    const effectsJson: Record<string, unknown> = {
-      effects: form.effects.map((e) => ({
-        type: e.type,
-        code: e.code,
-        display_label: e.display_label,
-        amount: parseInt(e.amount, 10),
-      })),
-      mail: {
-        subject: form.mail_subject || `購買成功 — ${form.name_display}`,
-        body: form.mail_body,
-        expire_days: parseInt(form.mail_expire_days, 10) || 30,
-      },
-    };
+    // effects 內容由遊戲端 PlayFab catalog 主控,後台只維護 web 端展示資訊
+    // 保留既有商品的 effects(避免清空後派發少資料);新建商品 effects 留空
+    const existingEffects =
+      mode === 'edit' && product?.effects && typeof product.effects === 'object'
+        ? (product.effects as Record<string, unknown>)
+        : {};
+
+    const effectsJson: Record<string, unknown> = { ...existingEffects };
     if (form.icon) effectsJson.icon = form.icon;
+    else delete effectsJson.icon;
     if (form.purchase_limit_label) effectsJson.purchase_limit_label = form.purchase_limit_label;
+    else delete effectsJson.purchase_limit_label;
 
     onSave({
       code: form.code,
@@ -484,8 +421,8 @@ function ProductFormModal({
                   onChange={(e) => update('status', e.target.value as 'ACTIVE' | 'INACTIVE')}
                   className="input"
                 >
-                  <option value="ACTIVE">ACTIVE</option>
-                  <option value="INACTIVE">INACTIVE</option>
+                  <option value="ACTIVE">啟用</option>
+                  <option value="INACTIVE">下架</option>
                 </select>
               </Field>
             </div>
@@ -525,46 +462,6 @@ function ProductFormModal({
                   </div>
                 )}
 
-                <div>
-                  <div className="mb-1 text-xs text-slate-500">圖片 preset</div>
-                  <div className="flex flex-wrap gap-2">
-                    {ICON_IMAGE_PRESETS.map((p) => (
-                      <button
-                        type="button"
-                        key={p.path}
-                        onClick={() => update('icon', p.path)}
-                        className="flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1 text-xs hover:border-brand-400 hover:bg-brand-50"
-                        title={p.path}
-                      >
-                        <img
-                          src={p.path}
-                          alt={p.label}
-                          width={28}
-                          height={28}
-                          style={{ imageRendering: 'pixelated', width: 28, height: 28 }}
-                          className="rounded"
-                        />
-                        <span>{p.label}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <div className="mb-1 text-xs text-slate-500">Emoji preset</div>
-                  <div className="flex flex-wrap gap-1">
-                    {ICON_EMOJI_PRESETS.map((emoji) => (
-                      <button
-                        type="button"
-                        key={emoji}
-                        onClick={() => update('icon', emoji)}
-                        className="rounded border border-slate-200 px-2 py-1 text-xl hover:border-brand-400 hover:bg-brand-50"
-                      >
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-                </div>
               </div>
             </Field>
             <Field label="限購標籤(純展示,例:限購 1/1、每日限購 2/2)">
@@ -608,102 +505,6 @@ function ProductFormModal({
                 />
               </Field>
             </div>
-          </Section>
-
-          {/* 包含內容 */}
-          <Section title="包含內容(派發給玩家的物品)">
-            <div className="space-y-2">
-              {form.effects.map((eff, i) => (
-                <div
-                  key={i}
-                  className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2"
-                >
-                  <select
-                    value={eff.type}
-                    onChange={(e) =>
-                      updateEffect(i, { type: e.target.value as EffectType })
-                    }
-                    className="input w-24"
-                  >
-                    {EFFECT_TYPES.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="text"
-                    value={eff.code}
-                    onChange={(e) =>
-                      updateEffect(i, { code: e.target.value.toUpperCase() })
-                    }
-                    className="input w-32 font-mono text-xs"
-                    placeholder="DIAMOND"
-                  />
-                  <input
-                    type="text"
-                    value={eff.display_label}
-                    onChange={(e) => updateEffect(i, { display_label: e.target.value })}
-                    className="input flex-1"
-                    placeholder="啟源石"
-                  />
-                  <input
-                    type="number"
-                    value={eff.amount}
-                    onChange={(e) => updateEffect(i, { amount: e.target.value })}
-                    className="input w-24"
-                    placeholder="100"
-                    min={0}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeEffect(i)}
-                    disabled={form.effects.length === 1}
-                    className="text-rose-600 hover:text-rose-800 disabled:opacity-30"
-                    title={form.effects.length === 1 ? '至少要留一筆' : '刪除'}
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-              <button
-                type="button"
-                onClick={addEffect}
-                className="rounded border border-dashed border-slate-300 px-3 py-1.5 text-sm text-slate-600 hover:border-brand-400 hover:bg-brand-50"
-              >
-                + 新增一筆
-              </button>
-            </div>
-          </Section>
-
-          {/* 信件 */}
-          <Section title="派發信件(寄到玩家遊戲信箱的訊息)">
-            <Field label="信件主旨">
-              <input
-                type="text"
-                value={form.mail_subject}
-                onChange={(e) => update('mail_subject', e.target.value)}
-                className="input"
-                placeholder={`(空白時自動帶:購買成功 — ${form.name_display})`}
-              />
-            </Field>
-            <Field label="信件內文">
-              <textarea
-                value={form.mail_body}
-                onChange={(e) => update('mail_body', e.target.value)}
-                className="input min-h-[60px]"
-              />
-            </Field>
-            <Field label="失效天數">
-              <input
-                type="number"
-                value={form.mail_expire_days}
-                onChange={(e) => update('mail_expire_days', e.target.value)}
-                className="input w-24"
-                min={1}
-                max={365}
-              />
-            </Field>
           </Section>
 
           {(validationErr || error) && (
@@ -762,33 +563,13 @@ function Field({
   );
 }
 
-interface ProductEffectShape {
-  type?: string;
-  code?: string;
-  display_label?: string;
-  amount?: number;
-}
 interface ProductEffectsShape {
-  effects?: ProductEffectShape[];
-  mail?: { subject?: string; body?: string; expire_days?: number };
   icon?: string;
   purchase_limit_label?: string;
 }
 
 function productToForm(p: AdminProduct): ProductFormState {
   const e = (p.effects ?? {}) as ProductEffectsShape;
-  const effects: EffectRow[] =
-    e.effects && e.effects.length > 0
-      ? e.effects.map((x) => ({
-          type: (EFFECT_TYPES.includes(x.type as EffectType)
-            ? (x.type as EffectType)
-            : 'currency'),
-          code: x.code ?? '',
-          display_label: x.display_label ?? '',
-          amount: x.amount != null ? String(x.amount) : '',
-        }))
-      : [{ type: 'currency', code: 'DIAMOND', display_label: '啟源石', amount: '' }];
-
   return {
     code: p.code,
     name_display: p.nameDisplay,
@@ -798,10 +579,6 @@ function productToForm(p: AdminProduct): ProductFormState {
     status: p.status,
     icon: e.icon ?? '',
     purchase_limit_label: e.purchase_limit_label ?? '',
-    effects,
-    mail_subject: e.mail?.subject ?? '',
-    mail_body: e.mail?.body ?? '',
-    mail_expire_days: String(e.mail?.expire_days ?? 30),
     playfab_item_id: p.playfabItemId ?? '',
     playfab_store_id: p.playfabStoreId ?? '',
   };

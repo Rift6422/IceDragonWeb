@@ -2,18 +2,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { fetchOrders, type ListOrdersQuery } from '@/api/admin';
-
-const STATUS_OPTIONS = [
-  { value: '', label: '全部' },
-  { value: 'PENDING', label: 'PENDING' },
-  { value: 'AUTHED', label: 'AUTHED' },
-  { value: 'PAID', label: 'PAID' },
-  { value: 'CONFIRMED', label: 'CONFIRMED' },
-  { value: 'DELIVERED', label: 'DELIVERED' },
-  { value: 'DELIVERY_FAILED', label: 'DELIVERY_FAILED' },
-  { value: 'CANCELLED', label: 'CANCELLED' },
-  { value: 'FAILED', label: 'FAILED' },
-];
+import { ORDER_STATUS_FILTER_OPTIONS, orderStatusColor, orderStatusLabel } from '@/utils/statusLabel';
 
 export function AdminOrdersPage() {
   const [filter, setFilter] = useState<ListOrdersQuery>({ limit: 50, offset: 0 });
@@ -36,7 +25,7 @@ export function AdminOrdersPage() {
             value={filter.status ?? ''}
             onChange={(e) => setFilter((f) => ({ ...f, status: e.target.value || undefined, offset: 0 }))}
           >
-            {STATUS_OPTIONS.map((o) => (
+            {ORDER_STATUS_FILTER_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
@@ -139,17 +128,9 @@ export function AdminOrdersPage() {
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, string> = {
-    DELIVERED: 'bg-emerald-100 text-emerald-700',
-    CONFIRMED: 'bg-blue-100 text-blue-700',
-    PAID: 'bg-cyan-100 text-cyan-700',
-    AUTHED: 'bg-slate-100 text-slate-700',
-    PENDING: 'bg-slate-100 text-slate-500',
-    DELIVERY_FAILED: 'bg-red-100 text-red-700',
-    FAILED: 'bg-red-100 text-red-700',
-    CANCELLED: 'bg-slate-100 text-slate-400',
-  };
   return (
-    <span className={`rounded px-2 py-0.5 text-xs font-medium ${map[status] ?? 'bg-slate-100'}`}>{status}</span>
+    <span className={`rounded px-2 py-0.5 text-xs font-medium ${orderStatusColor(status)}`}>
+      {orderStatusLabel(status)}
+    </span>
   );
 }

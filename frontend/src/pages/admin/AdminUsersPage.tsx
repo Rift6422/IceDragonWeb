@@ -63,9 +63,7 @@ export function AdminUsersPage() {
                 <tr>
                   <th className="px-3 py-2 text-left">UID</th>
                   <th className="px-3 py-2 text-left">Email</th>
-                  <th className="px-3 py-2 text-left">顯示名稱</th>
                   <th className="px-3 py-2 text-center">狀態</th>
-                  <th className="px-3 py-2 text-left">最後登入</th>
                   <th className="px-3 py-2 text-left">建立時間</th>
                 </tr>
               </thead>
@@ -74,20 +72,16 @@ export function AdminUsersPage() {
                   <tr key={u.id} className="hover:bg-slate-50">
                     <td className="px-3 py-2 font-mono text-xs">{u.uid}</td>
                     <td className="px-3 py-2 text-xs">{u.email ?? '—'}</td>
-                    <td className="px-3 py-2 text-xs">{u.display_name ?? '—'}</td>
                     <td className="px-3 py-2 text-center">
                       {u.is_active ? (
                         <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs text-emerald-700">
-                          active
+                          啟用
                         </span>
                       ) : (
                         <span className="rounded bg-slate-200 px-2 py-0.5 text-xs text-slate-500">
-                          inactive
+                          停用
                         </span>
                       )}
-                    </td>
-                    <td className="px-3 py-2 text-xs text-slate-500">
-                      {u.last_login_at ? new Date(u.last_login_at).toLocaleString('zh-TW') : '—'}
                     </td>
                     <td className="px-3 py-2 text-xs text-slate-500">
                       {new Date(u.created_at).toLocaleString('zh-TW')}
