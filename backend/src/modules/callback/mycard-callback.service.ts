@@ -237,6 +237,7 @@ export class MyCardCallbackService {
     const encoded = encodeURIComponent(facTradeSeq);
     const deadline = Date.now() + timeoutMs;
     let pollCount = 0;
+    let probeTriggered = false;
 
     while (Date.now() < deadline) {
       const order = await this.prisma.order.findUnique({
@@ -246,7 +247,6 @@ export class MyCardCallbackService {
       pollCount++;
 
       if (!order) {
-        // 找不到單就放行,前端 modal 會 fallback 到 poll(也會撈不到)
         this.logger.warn(`wait-and-join: order ${facTradeSeq} not found after ${pollCount} polls`);
         return `/?paid=${encoded}`;
       }
@@ -256,24 +256,28 @@ export class MyCardCallbackService {
         this.logger.log(`wait-and-join: ${facTradeSeq} DELIVERED after ${pollCount} polls`);
         return `/?paid=${encoded}&result=success`;
       }
-      if (s === OrderStatus.DELIVERY_FAILED) {
-        return `/?paid=${encoded}&result=delivery_failed`;
-      }
-      if (s === OrderStatus.FAILED) {
-        return `/?paid=${encoded}&result=fail`;
-      }
-      if (s === OrderStatus.CANCELLED) {
-        return `/?paid=${encoded}&result=cancelled`;
+      if (s === OrderStatus.DELIVERY_FAILED) return `/?paid=${encoded}&result=delivery_failed`;
+      if (s === OrderStatus.FAILED) return `/?paid=${encoded}&result=fail`;
+      if (s === OrderStatus.CANCELLED) return `/?paid=${encoded}&result=cancelled`;
+
+      // 第一次看到還在 AUTHED → 主動觸發 reprocessOne(等同 supplement 的單筆處理)
+      // 原因:MyCard sandbox 不主動推 trade-result,只靠 supplement(間隔 ~20 分鐘)
+      // 我們有 AuthCode 可以直接打 TradeQuery 確認真實狀態,不必等 MyCard supplement。
+      // fire-and-forget(不 await)— 讓 reprocessOne 跟我們的 polling 平行跑,
+      // 0.2 秒 poll 會撈到 reprocessOne 推進後的最新 status。
+      if (!probeTriggered && pollCount === 1 && s === OrderStatus.AUTHED) {
+        probeTriggered = true;
+        this.logger.log(`wait-and-join: ${facTradeSeq} still AUTHED → trigger active reprocess (don't wait MyCard supplement)`);
+        this.reprocessOne(facTradeSeq).catch((err) => {
+          this.logger.error(`active reprocess failed for ${facTradeSeq}: ${err instanceof Error ? err.message : err}`);
+        });
       }
 
-      // 還在 PENDING / AUTHED / PAID / CONFIRMED → 再等
       await new Promise((r) => setTimeout(r, 200));
     }
 
-    // timeout:server callback 還沒處理完(可能網路慢、可能根本沒到)
-    // 不帶 ?result=,讓前端 modal poll 接手
     this.logger.warn(
-      `wait-and-join: ${facTradeSeq} timeout after ${pollCount} polls (${timeoutMs}ms),no terminal state yet`,
+      `wait-and-join: ${facTradeSeq} timeout after ${pollCount} polls (${timeoutMs}ms),probe=${probeTriggered}`,
     );
     return `/?paid=${encoded}`;
   }
