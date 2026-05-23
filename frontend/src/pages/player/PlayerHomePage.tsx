@@ -4,8 +4,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { extractErrorMessage } from '@/api/client';
 import {
   createPlayerOrder,
+  fetchMyOrderDetail,
   fetchPlayerProducts,
   verifyPlayerUid,
+  type OrderStatus,
+  type PlayerOrderDetail,
   type ProductCategory,
   type ProductEffect,
   type PublicProduct,
@@ -249,31 +252,21 @@ function ProductsScreen({
 
   // 「剛付完款」流程
   // ─────────────────────────────────────────────────────────
-  // 玩家在 MyCard 點「返回商家」→ 後端 GET /api/mycard/trade-result
-  // 302 導回 /?paid={facTradeSeq}。這裡攔到 ?paid= 後:
-  //   1. 顯示成功 banner(2 秒)
-  //   2. 等遊戲端 grantrmproduct 完成(我方 callback → dispatch → 派發),
-  //      預估 1-2 秒;先 invalidate 立刻撈一次,3 秒後再撈一次保底
-  //   3. 把 ?paid= 從 URL 拿掉,避免重整又觸發一次
-  const [showPaidBanner, setShowPaidBanner] = useState(false);
+  // 玩家在 MyCard 點「返回商家」→ 後端 302 導回 /?paid={facTradeSeq}
+  // 這裡顯示 PaymentResultModal,實時 poll 訂單狀態。
+  //
+  // ?paid= 不會立刻從 URL 拿掉,讓玩家手動關掉 modal 後才清(避免關掉但訂單狀態還沒收到的狀況)
+  const [showPaymentResult, setShowPaymentResult] = useState(false);
   useEffect(() => {
     if (refreshAfterPayRef.current) return;
     if (!paidFacTradeSeq) return;
     refreshAfterPayRef.current = true;
-    setShowPaidBanner(true);
+    setShowPaymentResult(true);
+  }, [paidFacTradeSeq]);
 
-    // 第一次刷:幾乎立即(派發可能還沒跑完,但先試)
-    queryClient.invalidateQueries({ queryKey: ['player', 'products', uid] });
-
-    // 第二次刷:3 秒後(讓派發有時間 commit)
-    const refetchTimer = setTimeout(() => {
-      queryClient.invalidateQueries({ queryKey: ['player', 'products', uid] });
-    }, 3000);
-
-    // 5 秒後收起 banner
-    const bannerTimer = setTimeout(() => setShowPaidBanner(false), 5000);
-
-    // 把 ?paid= 從 URL 移除(其他 params 保留)
+  const handlePaymentResultClose = () => {
+    setShowPaymentResult(false);
+    // 收起 modal → 清 URL + 重撈商品(限購可能已扣)
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
@@ -282,12 +275,8 @@ function ProductsScreen({
       },
       { replace: true },
     );
-
-    return () => {
-      clearTimeout(refetchTimer);
-      clearTimeout(bannerTimer);
-    };
-  }, [paidFacTradeSeq, queryClient, setSearchParams, uid]);
+    queryClient.invalidateQueries({ queryKey: ['player', 'products', uid] });
+  };
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['player', 'products', uid],
@@ -359,19 +348,6 @@ function ProductsScreen({
         </div>
       </section>
 
-      {/* 付款成功 banner — 從 MyCard 返回時顯示 */}
-      {showPaidBanner && (
-        <div className="mb-4 flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 sm:items-center">
-          <span className="text-xl leading-none">✓</span>
-          <div className="flex-1">
-            <div className="font-semibold">付款完成</div>
-            <div className="text-xs text-emerald-700">
-              商品正在派發到您的遊戲信箱,限購狀態即將更新...
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* 商品分類 tabs */}
       <section className="mb-3">
         <h2 className="label mb-2 block">選擇商品</h2>
@@ -437,8 +413,235 @@ function ProductsScreen({
 
       {/* 購買 loading overlay — 完全擋住 UI 直到跳轉 MyCard */}
       {showPurchaseOverlay && <PurchaseLoadingOverlay />}
+
+      {/* 付款結果 modal — MyCard 返回後 poll 訂單狀態實時顯示 */}
+      {showPaymentResult && paidFacTradeSeq && (
+        <PaymentResultModal
+          facTradeSeq={paidFacTradeSeq}
+          onClose={handlePaymentResultClose}
+        />
+      )}
     </div>
   );
+}
+
+// ============================================================
+// PaymentResultModal — MyCard 返回後顯示付款結果
+// ============================================================
+
+/**
+ * Poll /api/orders/:facTradeSeq 看訂單目前狀態:
+ *   PENDING / AUTHED        → 處理中(spinner)
+ *   PAID / CONFIRMED        → 付款成功,正在派發(綠色 + spinner)
+ *   DELIVERED               → ✓ 付款成功 + 商品已派發(綠色,終態)
+ *   DELIVERY_FAILED         → ⚠ 付款成功但派發失敗(琥珀色,終態)
+ *   FAILED / CANCELLED      → ✗ 付款失敗(紅色,終態)
+ *
+ * 終態到達後停止 poll;非終態每 2 秒重打一次,最多 60 秒。
+ */
+function PaymentResultModal({
+  facTradeSeq,
+  onClose,
+}: {
+  facTradeSeq: string;
+  onClose: () => void;
+}) {
+  const [elapsedSec, setElapsedSec] = useState(0);
+
+  // 進度計時器 — 給 polling timeout 用
+  useEffect(() => {
+    const t = setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const { data: order } = useQuery({
+    queryKey: ['player', 'order-result', facTradeSeq],
+    queryFn: () => fetchMyOrderDetail(facTradeSeq),
+    refetchInterval: (query) => {
+      // 終態就停 poll
+      const s = query.state.data?.status;
+      if (s && isTerminalStatus(s)) return false;
+      // 60 秒 timeout 後也停
+      if (elapsedSec > 60) return false;
+      return 2000;
+    },
+    retry: 1,
+  });
+
+  const view = renderPaymentView(order, elapsedSec);
+
+  return (
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/70 px-4 backdrop-blur-sm">
+      <div className="w-full max-w-md overflow-hidden rounded-xl bg-white shadow-2xl">
+        <div className={'flex flex-col items-center gap-3 px-5 py-6 sm:px-6 ' + view.bgClass}>
+          <div className={'text-5xl ' + view.iconClass}>{view.icon}</div>
+          <div className="text-center">
+            <h2 className={'text-lg font-bold sm:text-xl ' + view.titleClass}>
+              {view.title}
+            </h2>
+            {view.subtitle && (
+              <p className={'mt-1 text-sm ' + view.subtitleClass}>{view.subtitle}</p>
+            )}
+          </div>
+        </div>
+
+        {order && (
+          <div className="space-y-1 border-t border-slate-100 px-5 py-3 text-xs text-slate-500 sm:px-6">
+            <div className="flex justify-between">
+              <span>訂單編號</span>
+              <span className="font-mono text-slate-700">{order.fac_trade_seq}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>商品</span>
+              <span className="text-slate-700">{order.product_name}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>金額</span>
+              <span className="font-semibold text-slate-700">
+                NT$ {Number(order.amount).toLocaleString()}
+              </span>
+            </div>
+          </div>
+        )}
+
+        <div className="border-t border-slate-100 bg-slate-50 px-5 py-3 sm:px-6">
+          <button
+            onClick={onClose}
+            className={view.isTerminal ? 'btn-primary w-full py-2.5' : 'btn-secondary w-full py-2.5'}
+          >
+            {view.isTerminal ? '確定' : '我知道了'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function isTerminalStatus(s: OrderStatus): boolean {
+  return s === 'DELIVERED' || s === 'DELIVERY_FAILED' || s === 'FAILED' || s === 'CANCELLED';
+}
+
+interface PaymentView {
+  icon: string;
+  iconClass: string;
+  title: string;
+  titleClass: string;
+  subtitle: string | null;
+  subtitleClass: string;
+  bgClass: string;
+  isTerminal: boolean;
+}
+
+function renderPaymentView(order: PlayerOrderDetail | undefined, elapsedSec: number): PaymentView {
+  // 還沒撈到資料 — 初始狀態
+  if (!order) {
+    return {
+      icon: '⟳',
+      iconClass: 'animate-spin text-slate-400',
+      title: '查詢付款結果中...',
+      titleClass: 'text-slate-800',
+      subtitle: '請稍候,正在連線後端',
+      subtitleClass: 'text-slate-500',
+      bgClass: 'bg-slate-50',
+      isTerminal: false,
+    };
+  }
+
+  const s = order.status;
+
+  if (s === 'DELIVERED') {
+    return {
+      icon: '✓',
+      iconClass: 'text-emerald-500',
+      title: '付款成功,商品已派發',
+      titleClass: 'text-emerald-900',
+      subtitle: '已寄入您的遊戲信箱,登入遊戲即可領取',
+      subtitleClass: 'text-emerald-700',
+      bgClass: 'bg-emerald-50',
+      isTerminal: true,
+    };
+  }
+
+  if (s === 'PAID' || s === 'CONFIRMED') {
+    return {
+      icon: '⟳',
+      iconClass: 'animate-spin text-emerald-500',
+      title: '付款成功,正在派發商品',
+      titleClass: 'text-emerald-900',
+      subtitle: '通常 5-10 秒內完成,請稍候...',
+      subtitleClass: 'text-emerald-700',
+      bgClass: 'bg-emerald-50',
+      isTerminal: false,
+    };
+  }
+
+  if (s === 'AUTHED' || s === 'PENDING') {
+    // MyCard 結果尚未回到我們(callback 還在路上),或 supplement 走補儲機制
+    const slow = elapsedSec > 15;
+    return {
+      icon: '⟳',
+      iconClass: 'animate-spin text-amber-500',
+      title: slow ? '正在確認付款結果' : '處理中...',
+      titleClass: 'text-amber-900',
+      subtitle: slow
+        ? '若超過 20 分鐘仍未完成,請聯繫客服(訂單編號已下方顯示)'
+        : '請稍候,正在從 MyCard 確認付款',
+      subtitleClass: 'text-amber-700',
+      bgClass: 'bg-amber-50',
+      isTerminal: false,
+    };
+  }
+
+  if (s === 'DELIVERY_FAILED') {
+    return {
+      icon: '⚠',
+      iconClass: 'text-amber-500',
+      title: '付款成功,但派發失敗',
+      titleClass: 'text-amber-900',
+      subtitle: '我方已收到您的款項,客服將盡快為您手動補發',
+      subtitleClass: 'text-amber-700',
+      bgClass: 'bg-amber-50',
+      isTerminal: true,
+    };
+  }
+
+  if (s === 'FAILED') {
+    return {
+      icon: '✗',
+      iconClass: 'text-rose-500',
+      title: '付款未完成',
+      titleClass: 'text-rose-900',
+      subtitle: '若您已扣款請聯繫客服協助處理',
+      subtitleClass: 'text-rose-700',
+      bgClass: 'bg-rose-50',
+      isTerminal: true,
+    };
+  }
+
+  if (s === 'CANCELLED') {
+    return {
+      icon: '✗',
+      iconClass: 'text-slate-400',
+      title: '訂單已取消',
+      titleClass: 'text-slate-800',
+      subtitle: null,
+      subtitleClass: 'text-slate-500',
+      bgClass: 'bg-slate-50',
+      isTerminal: true,
+    };
+  }
+
+  // fallback
+  return {
+    icon: '?',
+    iconClass: 'text-slate-400',
+    title: `狀態:${s}`,
+    titleClass: 'text-slate-800',
+    subtitle: null,
+    subtitleClass: 'text-slate-500',
+    bgClass: 'bg-slate-50',
+    isTerminal: false,
+  };
 }
 
 // ============================================================

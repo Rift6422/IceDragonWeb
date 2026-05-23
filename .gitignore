@@ -33,6 +33,6 @@ npm-debug.log*
 coverage/
 .nyc_output/
 
-# Internal tooling artifacts
+# Internal tooling artifacts(QA / browse 工具的 audit log)
 .gstack/
 .gbrain/

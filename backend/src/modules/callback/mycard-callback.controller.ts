@@ -82,8 +82,14 @@ export class MyCardCallbackController {
   /** §3.7 交易差異比對(POST,回 JSON)— 保留 internal URL */
   @Post('diff-report')
   @HttpCode(HttpStatus.OK)
-  diffReport(@Body() body: DiffReportBody): Promise<{ trades: unknown[] }> {
-    return this.callback.handleDiffReport(body);
+  diffReport(@Body() body: DiffReportBody, @Req() req: Request): Promise<{ trades: unknown[] }> {
+    return this.callback.handleDiffReport(body, {
+      sourceIp: req.ip,
+      userAgent: req.headers['user-agent']?.toString(),
+      rawBody: JSON.stringify(body),
+      httpMethod: 'POST',
+      url: '/api/mycard/diff-report',
+    });
   }
 
   /**
@@ -95,8 +101,14 @@ export class MyCardCallbackController {
    */
   @Get('topup-records')
   @Header('Content-Type', 'text/plain; charset=utf-8')
-  topupRecords(@Query() query: TopupRecordsQuery): Promise<string> {
-    return this.callback.handleTopupRecords(query);
+  topupRecords(@Query() query: TopupRecordsQuery, @Req() req: Request): Promise<string> {
+    return this.callback.handleTopupRecords(query, {
+      sourceIp: req.ip,
+      userAgent: req.headers['user-agent']?.toString(),
+      rawBody: JSON.stringify(query),
+      httpMethod: 'GET',
+      url: '/api/mycard/topup-records',
+    });
   }
 
   /**
@@ -106,7 +118,13 @@ export class MyCardCallbackController {
    */
   @Post('topup-records')
   @HttpCode(HttpStatus.OK)
-  diffReportAtTopupRecords(@Body() body: DiffReportBody): Promise<{ trades: unknown[] }> {
-    return this.callback.handleDiffReport(body);
+  diffReportAtTopupRecords(@Body() body: DiffReportBody, @Req() req: Request): Promise<{ trades: unknown[] }> {
+    return this.callback.handleDiffReport(body, {
+      sourceIp: req.ip,
+      userAgent: req.headers['user-agent']?.toString(),
+      rawBody: JSON.stringify(body),
+      httpMethod: 'POST',
+      url: '/api/mycard/topup-records',
+    });
   }
 }

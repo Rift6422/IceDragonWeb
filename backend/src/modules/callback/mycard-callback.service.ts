@@ -49,6 +49,10 @@ export class MyCardCallbackService {
     payload: TradeResultPayload,
     meta: { sourceIp?: string; userAgent?: string; rawBody?: string },
   ): Promise<{ ok: boolean; processed: boolean }> {
+    this.logger.log(
+      `[INBOUND] TRADE_RESULT FacTradeSeq=${payload.FacTradeSeq} PayResult=${payload.PayResult} MyCardTradeNo=${payload.MyCardTradeNo} from=${meta.sourceIp} UA=${(meta.userAgent ?? '').slice(0, 40)}`,
+    );
+
     // 1. 記 inbound log
     const log = await this.writeInboundLog(CallbackKind.TRADE_RESULT, meta, payload);
 
@@ -179,6 +183,10 @@ export class MyCardCallbackService {
     rawData: string,
     meta: { sourceIp?: string; userAgent?: string; rawBody?: string },
   ): Promise<{ ok: boolean; processed: number }> {
+    this.logger.log(
+      `[INBOUND] SUPPLEMENT from=${meta.sourceIp} UA=${(meta.userAgent ?? '').slice(0, 40)} data=${rawData.slice(0, 200)}`,
+    );
+
     const log = await this.writeInboundLog(CallbackKind.SUPPLEMENT, meta, { DATA: rawData });
 
     let data: SupplementDataPayload;
@@ -262,11 +270,18 @@ export class MyCardCallbackService {
   // §3.7 差異比對(POST,回 JSON 給 MyCard)
   // ============================================================
 
-  async handleDiffReport(query: {
-    StartDateTime?: string;
-    EndDateTime?: string;
-    MyCardTradeNo?: string;
-  }): Promise<{ trades: unknown[] }> {
+  async handleDiffReport(
+    query: { StartDateTime?: string; EndDateTime?: string; MyCardTradeNo?: string },
+    meta?: { sourceIp?: string; userAgent?: string; rawBody?: string; httpMethod?: string; url?: string },
+  ): Promise<{ trades: unknown[] }> {
+    this.logger.log(
+      `[INBOUND] DIFF_REPORT from=${meta?.sourceIp} StartDateTime=${query.StartDateTime} EndDateTime=${query.EndDateTime} MyCardTradeNo=${query.MyCardTradeNo}`,
+    );
+
+    const log = meta
+      ? await this.writeInboundLog(CallbackKind.DIFF_REPORT, meta, query)
+      : null;
+
     // 找成功訂單
     const where: Prisma.OrderWhereInput = {
       status: OrderStatus.DELIVERED,
@@ -289,7 +304,7 @@ export class MyCardCallbackService {
       take: 1000,
     });
 
-    return {
+    const result = {
       trades: orders.map((o) => ({
         PaymentType: o.transaction?.paymentType ?? '',
         TradeSeq: o.transaction?.tradeSeq ?? '',
@@ -303,17 +318,37 @@ export class MyCardCallbackService {
         CreateAccountIP: o.user.createdIp ?? '',
       })),
     };
+
+    if (log) {
+      await this.prisma.callbackLog.update({
+        where: { id: log.id },
+        data: {
+          processed: true,
+          responseStatus: 200,
+          responseBody: JSON.stringify({ tradeCount: result.trades.length }),
+        },
+      });
+    }
+
+    return result;
   }
 
   // ============================================================
   // 廠商儲值紀錄查詢(GET,回 CSV+<BR>)
   // ============================================================
 
-  async handleTopupRecords(query: {
-    StartDate?: string;
-    EndDate?: string;
-    MyCardID?: string;
-  }): Promise<string> {
+  async handleTopupRecords(
+    query: { StartDate?: string; EndDate?: string; MyCardID?: string },
+    meta?: { sourceIp?: string; userAgent?: string; rawBody?: string; httpMethod?: string; url?: string },
+  ): Promise<string> {
+    this.logger.log(
+      `[INBOUND] TOPUP_RECORDS from=${meta?.sourceIp} StartDate=${query.StartDate} EndDate=${query.EndDate} MyCardID=${query.MyCardID}`,
+    );
+
+    const log = meta
+      ? await this.writeInboundLog(CallbackKind.TOPUP_RECORDS, meta, query)
+      : null;
+
     const where: Prisma.OrderWhereInput = {
       status: OrderStatus.DELIVERED,
     };
@@ -339,7 +374,7 @@ export class MyCardCallbackService {
     });
 
     // CSV 11 欄,每筆 <BR> 結尾
-    return orders
+    const csv = orders
       .map((o) => {
         const fields = [
           o.transaction?.mycardTradeNo ?? '',
@@ -357,6 +392,19 @@ export class MyCardCallbackService {
         return fields.join(',') + ' <BR>';
       })
       .join('\n');
+
+    if (log) {
+      await this.prisma.callbackLog.update({
+        where: { id: log.id },
+        data: {
+          processed: true,
+          responseStatus: 200,
+          responseBody: JSON.stringify({ recordCount: orders.length }),
+        },
+      });
+    }
+
+    return csv;
   }
 
   // ============================================================
@@ -383,15 +431,15 @@ export class MyCardCallbackService {
 
   private async writeInboundLog(
     kind: CallbackKind,
-    meta: { sourceIp?: string; userAgent?: string; rawBody?: string },
+    meta: { sourceIp?: string; userAgent?: string; rawBody?: string; httpMethod?: string; url?: string },
     body: unknown,
   ): Promise<{ id: string }> {
     return this.prisma.callbackLog.create({
       data: {
         direction: CallbackDirection.INBOUND,
         kind,
-        httpMethod: 'POST',
-        url: `/api/mycard/${kind.toLowerCase().replace(/_/g, '-')}`,
+        httpMethod: meta.httpMethod ?? 'POST',
+        url: meta.url ?? `/api/mycard/${kind.toLowerCase().replace(/_/g, '-')}`,
         requestBody: meta.rawBody ?? JSON.stringify(body),
         sourceIp: meta.sourceIp ?? null,
         userAgent: meta.userAgent ?? null,
