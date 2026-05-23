@@ -13,9 +13,11 @@ async function bootstrap(): Promise<void> {
   const logger = new Logger('Bootstrap');
   const config = app.get(ConfigService);
 
-  // Trust proxy:正式部署在 Cloudflare + Zeabur(AWS LB)後面,要從 X-Forwarded-For / CF-Connecting-IP 拿真實 IP
-  // '1' = 信任最近一層 proxy(可改更嚴格的 CIDR list)
-  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  // Trust proxy:正式部署在 Cloudflare + Zeabur(AWS LB)後面共 2 層 proxy
+  // trust=1 只信最後一跳(Zeabur LB),req.ip 拿到的是 Cloudflare IP,不是真實 client IP
+  // → 設 true 信全部 hop,讓 req.ip = X-Forwarded-For[0] = 真實 client IP
+  // (CF 在 prod 會 strip 來源端任何 spoofed XFF,安全無虞;guard 內另外吃 CF-Connecting-IP 雙保險)
+  app.getHttpAdapter().getInstance().set('trust proxy', true);
 
   // MyCard 補儲 / 差異比對 callback 用 x-www-form-urlencoded 送 DATA={JSON}
   app.use(json({ limit: '2mb' }));

@@ -27,7 +27,11 @@ export class MyCardSourceGuard implements CanActivate {
     const mockMode = this.config.get<string>('MYCARD_MOCK_MODE') === 'true';
     const req = context.switchToHttp().getRequest<Request>();
     const res = context.switchToHttp().getResponse<Response>();
-    const clientIp = req.ip ?? '';
+    // 在 Cloudflare + Zeabur 後面,直接 req.ip 拿到的可能是 proxy IP
+    // Cloudflare 一定會帶 CF-Connecting-IP = 原始 client IP(無法被 spoof,因為 CF 自己 set)
+    // 沒有 CF-Connecting-IP 時 fallback 到 req.ip(Express 已啟 trust proxy,本來就會解 X-Forwarded-For)
+    const cfIp = req.headers['cf-connecting-ip']?.toString();
+    const clientIp = (cfIp && cfIp.trim()) || req.ip || '';
     const ua = req.headers['user-agent']?.toString() ?? '';
     const expectedUA = this.config.get<string>('MYCARD_USER_AGENT', 'MyCardGlobalBilling/1.0');
 
