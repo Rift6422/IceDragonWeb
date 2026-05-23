@@ -287,12 +287,16 @@ export class GameBackendService implements OnModuleInit {
   }
 
   private normalize(raw: RawStoreItemLimitation): ItemLimitation {
+    // left_quantity 統一夾到下限 0 — 遊戲端目前無冪等,重派時 LeftQuantity 可能變負數,
+    // 但對玩家 / 後台來說「-1 剩餘」沒意義,顯示「0 剩餘 = 已售完」較直觀。
+    // 不影響業務判斷:我方 pre-check 用 `<= 0` 擋,負數本來就會被擋。
+    const left = raw.limitation.LeftQuantity;
     return {
       store_id: raw.storeID,
       item_id: raw.itemID,
       limit_period: mapPeriod(raw.limitation.LimitPeriod),
       max_quantity: raw.limitation.MaxQuantity,
-      left_quantity: raw.limitation.LeftQuantity,
+      left_quantity: left < 0 ? 0 : left,
       reset_at: raw.limitation.ResetLimitDate,
     };
   }
