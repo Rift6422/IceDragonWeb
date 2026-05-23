@@ -320,12 +320,43 @@ export class MyCardCallbackService {
     });
     if (!order || !order.transaction?.authCode) return;
     if (order.status === OrderStatus.DELIVERED) return; // 已派發,跳過
+    if (order.status === OrderStatus.FAILED || order.status === OrderStatus.CANCELLED) return; // 已終態
 
     // TradeQuery
     const q = await this.mycard.tradeQuery(order.transaction.authCode, order.id);
-    if (!q.ok || q.data.PayResult !== '3') return;
+    if (!q.ok) return; // 查詢本身失敗(網路 / API 錯)→ 不動,等下次
 
-    // 更新 transaction
+    // PayResult=0 為明確失敗(MyCard 文件:0 = 失敗,3 = 成功)
+    // 觸發時機:玩家在 MyCard 取消、輸錯驗證碼(如測試 27889188)等
+    // 我們應該把訂單轉 FAILED,讓前端 modal 即時顯示「✗ 付款未完成」
+    if (q.data.PayResult === '0') {
+      this.logger.log(
+        `reprocessOne: ${facTradeSeq} TradeQuery PayResult=0 → FAILED (msg=${q.data.ReturnMsg ?? ''})`,
+      );
+      await this.prisma.transaction.update({
+        where: { orderId: order.id },
+        data: {
+          payResult: 0,
+          paymentType: q.data.PaymentType ?? order.transaction.paymentType,
+          mycardTradeNo: q.data.MyCardTradeNo ?? order.transaction.mycardTradeNo,
+          resultRawBody: q.data as unknown as Prisma.InputJsonValue,
+        },
+      });
+      await this.state.transition({
+        orderId: order.id,
+        toStatus: OrderStatus.FAILED,
+        triggeredBy: 'system',
+        reason: `Active probe / supplement: TradeQuery PayResult=0 (${q.data.ReturnMsg ?? ''})`,
+        metadata: { my_card_trade_no: q.data.MyCardTradeNo ?? null },
+      });
+      return;
+    }
+
+    // 其他 PayResult(非 0 非 3)→ 還沒明確結果(可能玩家還在 MyCard 頁面)
+    // 維持原狀,等下次 supplement 或 probe
+    if (q.data.PayResult !== '3') return;
+
+    // 成功路徑 — 更新 transaction
     await this.prisma.transaction.update({
       where: { orderId: order.id },
       data: {
