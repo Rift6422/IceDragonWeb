@@ -1,6 +1,6 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Request, Response } from 'express';
+import { Request } from 'express';
 
 /**
  * MyCard inbound callback 來源驗證 guard
@@ -26,7 +26,6 @@ export class MyCardSourceGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const mockMode = this.config.get<string>('MYCARD_MOCK_MODE') === 'true';
     const req = context.switchToHttp().getRequest<Request>();
-    const res = context.switchToHttp().getResponse<Response>();
     // 在 Cloudflare + Zeabur 後面,直接 req.ip 拿到的可能是 proxy IP
     // Cloudflare 一定會帶 CF-Connecting-IP = 原始 client IP(無法被 spoof,因為 CF 自己 set)
     // 沒有 CF-Connecting-IP 時 fallback 到 req.ip(Express 已啟 trust proxy,本來就會解 X-Forwarded-For)
@@ -40,19 +39,14 @@ export class MyCardSourceGuard implements CanActivate {
       return true;
     }
 
-    // 玩家瀏覽器 form-submit 回 /trade-result:不 block,改 302 導回首頁
-    // (MyCard「返回商家」按鈕在某些渠道是 form POST 而非 GET)
+    // 玩家瀏覽器 form-submit 回 /trade-result:不 block,讓 controller 用
+    // wait-and-join 處理(等 server-to-server callback 把訂單推進到終態再 302,
+    // 體驗更好)
     if (ua !== expectedUA && req.method === 'POST' && this.isTradeResultPath(req)) {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const facTradeSeq = typeof body.FacTradeSeq === 'string' ? body.FacTradeSeq.trim() : '';
-      const target = facTradeSeq
-        ? `/?paid=${encodeURIComponent(facTradeSeq)}`
-        : '/';
       this.logger.log(
-        `Browser POST to trade-result from ${clientIp} (UA=${ua.slice(0, 40)}) → 302 ${target}`,
+        `Browser POST to trade-result from ${clientIp} (UA=${ua.slice(0, 40)}) → forward to controller`,
       );
-      res.redirect(302, target);
-      return false; // 已寫入 response,NestJS 不會再覆蓋
+      return true; // pass through;由 controller 內判斷 UA 分流
     }
 
     // UA 檢查

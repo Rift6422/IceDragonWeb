@@ -215,6 +215,70 @@ export class MyCardCallbackService {
   }
 
   /**
+   * 給玩家瀏覽器 form-submit 用:hold 連線等 server-to-server callback 把
+   * 訂單推進到終態,再回傳該導去的 URL(含 ?result= query 提示終態)。
+   *
+   * 為什麼這樣設計:
+   *   MyCard 同時送「server callback」和「瀏覽器 form-submit」兩條路。
+   *   瀏覽器通常會比 server callback 先到,玩家被 redirect 後會看到
+   *   「處理中...」轉圈,等 server callback 跑完才變成功。
+   *   wait-and-join 做的是:瀏覽器到了我們這先 hold 連線 N 秒輪詢訂單
+   *   狀態,等 server callback 把 status 推到 DELIVERED 才放人,玩家
+   *   一進到 / 就直接看到最終結果。
+   *
+   * @param facTradeSeq  訂單序號(可能空字串,代表 MyCard 沒帶,此時直接回 /)
+   * @param timeoutMs    最長等多久(建議 5-8 秒;Cloudflare 邊界是 100 秒,但
+   *                     hold 太久容易讓玩家覺得卡住)
+   * @returns            前端要去的 URL,含 ?paid= 和 ?result=(若已知終態)
+   */
+  async waitForOrderResolution(facTradeSeq: string, timeoutMs: number): Promise<string> {
+    if (!facTradeSeq) return '/';
+
+    const encoded = encodeURIComponent(facTradeSeq);
+    const deadline = Date.now() + timeoutMs;
+    let pollCount = 0;
+
+    while (Date.now() < deadline) {
+      const order = await this.prisma.order.findUnique({
+        where: { facTradeSeq },
+        select: { status: true },
+      });
+      pollCount++;
+
+      if (!order) {
+        // 找不到單就放行,前端 modal 會 fallback 到 poll(也會撈不到)
+        this.logger.warn(`wait-and-join: order ${facTradeSeq} not found after ${pollCount} polls`);
+        return `/?paid=${encoded}`;
+      }
+
+      const s = order.status;
+      if (s === OrderStatus.DELIVERED) {
+        this.logger.log(`wait-and-join: ${facTradeSeq} DELIVERED after ${pollCount} polls`);
+        return `/?paid=${encoded}&result=success`;
+      }
+      if (s === OrderStatus.DELIVERY_FAILED) {
+        return `/?paid=${encoded}&result=delivery_failed`;
+      }
+      if (s === OrderStatus.FAILED) {
+        return `/?paid=${encoded}&result=fail`;
+      }
+      if (s === OrderStatus.CANCELLED) {
+        return `/?paid=${encoded}&result=cancelled`;
+      }
+
+      // 還在 PENDING / AUTHED / PAID / CONFIRMED → 再等
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    // timeout:server callback 還沒處理完(可能網路慢、可能根本沒到)
+    // 不帶 ?result=,讓前端 modal poll 接手
+    this.logger.warn(
+      `wait-and-join: ${facTradeSeq} timeout after ${pollCount} polls (${timeoutMs}ms),no terminal state yet`,
+    );
+    return `/?paid=${encoded}`;
+  }
+
+  /**
    * 對外公開:手動觸發某張單的補儲流程(等同 MyCard 主動推 supplement)。
    *
    * 用途:

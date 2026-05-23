@@ -8,9 +8,11 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { ConfigService } from '@nestjs/config';
+import { Request, Response } from 'express';
 import { MyCardSourceGuard } from './guards/mycard-source.guard';
 import { MyCardCallbackService } from './mycard-callback.service';
 
@@ -54,18 +56,46 @@ interface TopupRecordsQuery {
 @Controller('mycard')
 @UseGuards(MyCardSourceGuard)
 export class MyCardCallbackController {
-  constructor(private readonly callback: MyCardCallbackService) {}
+  constructor(
+    private readonly callback: MyCardCallbackService,
+    private readonly config: ConfigService,
+  ) {}
 
-  /** §3.2.4 交易結果回傳 */
+  /**
+   * §3.2.4 交易結果回傳
+   *
+   * 同一 POST endpoint 接兩種來源,用 User-Agent 分流:
+   *   - `MyCardGlobalBilling/1.0`(server-to-server)→ 處理 callback 並回 200 JSON
+   *   - 其他(玩家瀏覽器 form-submit)→ wait-and-join 等 server callback
+   *     把狀態推到終態,再 302 redirect 到 /?paid=XXX&result=...
+   *
+   * 這支採 @Res() 寫 response,因為兩種來源回的格式不同(JSON vs redirect)。
+   */
   @Post('trade-result')
-  @HttpCode(HttpStatus.OK)
-  async tradeResult(@Body() body: TradeResultBody, @Req() req: Request): Promise<{ ok: boolean }> {
-    const result = await this.callback.handleTradeResult(body as Required<TradeResultBody>, {
-      sourceIp: req.ip,
-      userAgent: req.headers['user-agent']?.toString(),
-      rawBody: JSON.stringify(body),
-    });
-    return { ok: result.ok };
+  async tradeResult(
+    @Body() body: TradeResultBody,
+    @Req() req: Request,
+    @Res() res: Response,
+  ): Promise<void> {
+    const ua = req.headers['user-agent']?.toString() ?? '';
+    const expectedUA = this.config.get<string>('MYCARD_USER_AGENT', 'MyCardGlobalBilling/1.0');
+
+    if (ua === expectedUA) {
+      // server-to-server callback:走原本邏輯
+      const result = await this.callback.handleTradeResult(body as Required<TradeResultBody>, {
+        sourceIp: req.ip,
+        userAgent: ua,
+        rawBody: JSON.stringify(body),
+      });
+      res.status(HttpStatus.OK).json({ ok: result.ok });
+      return;
+    }
+
+    // 玩家瀏覽器 form-submit:hold 連線最多 6 秒,等 server callback 把訂單推到終態
+    // (CF 邊界 100 秒,Express keep-alive 預設 5 分鐘,6 秒足夠且玩家不會覺得久)
+    const facTradeSeq = body.FacTradeSeq ?? '';
+    const target = await this.callback.waitForOrderResolution(facTradeSeq, 6000);
+    res.redirect(302, target);
   }
 
   /** §3.6 補儲通知 */

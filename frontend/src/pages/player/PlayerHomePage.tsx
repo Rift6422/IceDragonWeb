@@ -98,6 +98,8 @@ export function PlayerHomePage() {
   ).toUpperCase();
   /** ?paid={FacTradeSeq} = 玩家剛付完款從 MyCard 返回,要刷新限購狀態 */
   const paidFacTradeSeq = searchParams.get('paid') ?? '';
+  /** ?result=success|fail|delivery_failed|cancelled = backend wait-and-join 已確認終態 */
+  const paidResultHint = (searchParams.get('result') ?? '').toLowerCase();
 
   const { uid: storedUid, email, setIdentity, clear } = usePlayerStore();
 
@@ -123,6 +125,7 @@ export function PlayerHomePage() {
       email={email}
       deepLinkItem={deepLinkItem}
       paidFacTradeSeq={paidFacTradeSeq}
+      paidResultHint={paidResultHint}
       onChangeUid={clear}
     />
   );
@@ -235,12 +238,14 @@ function ProductsScreen({
   email,
   deepLinkItem,
   paidFacTradeSeq,
+  paidResultHint,
   onChangeUid,
 }: {
   uid: string;
   email: string | null;
   deepLinkItem: string;
   paidFacTradeSeq: string;
+  paidResultHint: string;
   onChangeUid: () => void;
 }) {
   const [tab, setTab] = useState<ProductCategory>('BUNDLE');
@@ -266,11 +271,12 @@ function ProductsScreen({
 
   const handlePaymentResultClose = () => {
     setShowPaymentResult(false);
-    // 收起 modal → 清 URL + 重撈商品(限購可能已扣)
+    // 收起 modal → 清 URL(?paid + ?result)+ 重撈商品(限購可能已扣)
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
         next.delete('paid');
+        next.delete('result');
         return next;
       },
       { replace: true },
@@ -418,6 +424,7 @@ function ProductsScreen({
       {showPaymentResult && paidFacTradeSeq && (
         <PaymentResultModal
           facTradeSeq={paidFacTradeSeq}
+          resultHint={paidResultHint}
           onClose={handlePaymentResultClose}
         />
       )}
@@ -438,26 +445,36 @@ function ProductsScreen({
  *   FAILED / CANCELLED      → ✗ 付款失敗(紅色,終態)
  *
  * 終態到達後停止 poll;非終態每 2 秒重打一次,最多 60 秒。
+ *
+ * `resultHint`:backend wait-and-join 已確認終態時帶進來的暗示(`success` /
+ * `fail` / `delivery_failed` / `cancelled`),這時 modal 跳過 poll 直接顯示
+ * 終態畫面,只 fetch 一次拿訂單細節(訂單號 / 商品 / 金額)。
  */
 function PaymentResultModal({
   facTradeSeq,
+  resultHint,
   onClose,
 }: {
   facTradeSeq: string;
+  resultHint: string;
   onClose: () => void;
 }) {
   const [elapsedSec, setElapsedSec] = useState(0);
+  const hintedView = resultHintToView(resultHint);
 
-  // 進度計時器 — 給 polling timeout 用
+  // 進度計時器 — 給 polling timeout 用(只在無 hint 時生效)
   useEffect(() => {
+    if (hintedView) return;
     const t = setInterval(() => setElapsedSec((s) => s + 1), 1000);
     return () => clearInterval(t);
-  }, []);
+  }, [hintedView]);
 
   const { data: order } = useQuery({
     queryKey: ['player', 'order-result', facTradeSeq],
     queryFn: () => fetchMyOrderDetail(facTradeSeq),
     refetchInterval: (query) => {
+      // 有 hint 代表 backend 已確認終態 → 不必 poll(初次抓完就停)
+      if (hintedView) return false;
       // 終態就停 poll
       const s = query.state.data?.status;
       if (s && isTerminalStatus(s)) return false;
@@ -468,7 +485,7 @@ function PaymentResultModal({
     retry: 1,
   });
 
-  const view = renderPaymentView(order, elapsedSec);
+  const view = hintedView ?? renderPaymentView(order, elapsedSec);
 
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/70 px-4 backdrop-blur-sm">
@@ -519,6 +536,61 @@ function PaymentResultModal({
 
 function isTerminalStatus(s: OrderStatus): boolean {
   return s === 'DELIVERED' || s === 'DELIVERY_FAILED' || s === 'FAILED' || s === 'CANCELLED';
+}
+
+/**
+ * Backend wait-and-join 提早確認的終態 → 直接做出對應 view,不必等 poll
+ * (拿不到 hint 或 hint 無法識別 → 回 null,fallback 走 renderPaymentView)
+ */
+function resultHintToView(hint: string): PaymentView | null {
+  switch (hint) {
+    case 'success':
+      return {
+        icon: '✓',
+        iconClass: 'text-emerald-500',
+        title: '付款成功,商品已派發',
+        titleClass: 'text-emerald-900',
+        subtitle: '已寄入您的遊戲信箱,登入遊戲即可領取',
+        subtitleClass: 'text-emerald-700',
+        bgClass: 'bg-emerald-50',
+        isTerminal: true,
+      };
+    case 'delivery_failed':
+      return {
+        icon: '⚠',
+        iconClass: 'text-amber-500',
+        title: '付款成功,但派發失敗',
+        titleClass: 'text-amber-900',
+        subtitle: '我方已收到您的款項,客服將盡快為您手動補發',
+        subtitleClass: 'text-amber-700',
+        bgClass: 'bg-amber-50',
+        isTerminal: true,
+      };
+    case 'fail':
+      return {
+        icon: '✗',
+        iconClass: 'text-rose-500',
+        title: '付款未完成',
+        titleClass: 'text-rose-900',
+        subtitle: '若您已扣款請聯繫客服協助處理',
+        subtitleClass: 'text-rose-700',
+        bgClass: 'bg-rose-50',
+        isTerminal: true,
+      };
+    case 'cancelled':
+      return {
+        icon: '✗',
+        iconClass: 'text-slate-400',
+        title: '訂單已取消',
+        titleClass: 'text-slate-800',
+        subtitle: null,
+        subtitleClass: 'text-slate-500',
+        bgClass: 'bg-slate-50',
+        isTerminal: true,
+      };
+    default:
+      return null;
+  }
 }
 
 interface PaymentView {
