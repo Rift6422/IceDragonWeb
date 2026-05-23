@@ -17,7 +17,8 @@ export function AdminOrderDetailPage() {
   });
 
   const retryMut = useMutation({
-    mutationFn: (facTradeSeq: string) => retryCallback(facTradeSeq),
+    mutationFn: (input: { facTradeSeq: string; force?: boolean }) =>
+      retryCallback(input.facTradeSeq, { force: input.force }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['admin', 'orders', id] });
     },
@@ -69,23 +70,45 @@ export function AdminOrderDetailPage() {
         </div>
       </div>
 
-      {/* 補派獎按鈕(訂單尚未派發成功時可用) */}
+      {/* 補派獎按鈕 */}
       <div className="card">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="font-semibold text-slate-900">補派獎至遊戲端</h3>
             <p className="mt-1 text-xs text-slate-500">
-              觸發後端 reprocessOne:打 MyCard TradeQuery 確認付款狀態,若已付款則 PaymentConfirm + 派發到 PlayFab。
-              與 MyCard 補儲機制(§3.6)同一支邏輯,有冪等保護,重複按不會多扣 quota 或多發物品。
+              {order.status === 'DELIVERED'
+                ? '此單已派發成功。如玩家堅稱未收到禮包,可強制重派 — 注意:會再呼叫一次 PlayFab grantrmproduct,可能導致玩家收到第二份禮包或多扣限購 quota。'
+                : '觸發後端 reprocessOne:打 MyCard TradeQuery 確認付款狀態,若已付款則 PaymentConfirm + 派發到 PlayFab。與 §3.6 supplement 同一支邏輯,有冪等保護。'}
             </p>
           </div>
           <button
-            onClick={() => retryMut.mutate(order.facTradeSeq)}
-            disabled={retryMut.isPending || order.status === 'DELIVERED'}
-            className="btn-primary whitespace-nowrap"
-            title={order.status === 'DELIVERED' ? '已派發,無需重派' : '觸發補派獎'}
+            onClick={() => {
+              if (order.status === 'DELIVERED') {
+                // 強制重派 — 需要二次確認
+                const confirmed = window.confirm(
+                  `⚠️ 此訂單已派發成功(${formatTs(order.deliveredAt)})\n\n` +
+                    `強制重派會再次呼叫遊戲端 grantrmproduct,可能讓玩家收到第二份禮包,` +
+                    `也可能多扣 PlayFab 限購 quota。\n\n` +
+                    `確定要強制重派嗎?`,
+                );
+                if (!confirmed) return;
+                retryMut.mutate({ facTradeSeq: order.facTradeSeq, force: true });
+                return;
+              }
+              retryMut.mutate({ facTradeSeq: order.facTradeSeq });
+            }}
+            disabled={retryMut.isPending}
+            className={
+              order.status === 'DELIVERED'
+                ? 'btn-secondary whitespace-nowrap border-amber-400 text-amber-700 hover:bg-amber-50'
+                : 'btn-primary whitespace-nowrap'
+            }
           >
-            {retryMut.isPending ? '處理中…' : '補派獎'}
+            {retryMut.isPending
+              ? '處理中…'
+              : order.status === 'DELIVERED'
+              ? '強制重派'
+              : '補派獎'}
           </button>
         </div>
         {retryMut.data && (

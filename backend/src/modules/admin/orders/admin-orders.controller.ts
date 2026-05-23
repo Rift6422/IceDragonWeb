@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query, Req, UseGuards } from '@nestjs/common';
-import { IsString, Matches, MaxLength } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import { Request } from 'express';
 import { AdminOrdersService } from './admin-orders.service';
 import { ListOrdersDto } from './list-orders.dto';
@@ -14,6 +14,14 @@ class RetryCallbackDto {
   @MaxLength(50)
   @Matches(/^[A-Za-z0-9_-]+$/, { message: 'facTradeSeq invalid' })
   facTradeSeq!: string;
+
+  /**
+   * force=true:即使訂單已 DELIVERED 也再次呼叫派發(grantrmproduct)。
+   * 危險動作,可能讓玩家拿到第二份禮包;前端必須二次確認後才可送這個 flag。
+   */
+  @IsOptional()
+  @IsBoolean()
+  force?: boolean;
 }
 
 @Controller('admin/orders')
@@ -50,13 +58,13 @@ export class AdminOrdersController {
     @CurrentAdmin() admin: { id: string },
     @Req() req: Request,
   ): Promise<{ ok: boolean; status: string | null; message: string }> {
-    const result = await this.callback.forceReprocess(dto.facTradeSeq);
+    const result = await this.callback.forceReprocess(dto.facTradeSeq, { force: dto.force });
     await this.audit.log({
       adminId: admin.id,
-      action: 'retry_callback',
+      action: dto.force ? 'force_redispatch' : 'retry_callback',
       targetType: 'order',
       targetId: dto.facTradeSeq,
-      payload: { result },
+      payload: { result, force: !!dto.force },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent']?.toString(),
     });

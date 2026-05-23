@@ -146,8 +146,14 @@ export interface RetryCallbackResponse {
   message: string;
 }
 
-export async function retryCallback(facTradeSeq: string): Promise<RetryCallbackResponse> {
-  const { data } = await api.post<RetryCallbackResponse>('/api/admin/orders/retry-callback', { facTradeSeq });
+export async function retryCallback(
+  facTradeSeq: string,
+  opts: { force?: boolean } = {},
+): Promise<RetryCallbackResponse> {
+  const { data } = await api.post<RetryCallbackResponse>('/api/admin/orders/retry-callback', {
+    facTradeSeq,
+    force: opts.force ?? false,
+  });
   return data;
 }
 

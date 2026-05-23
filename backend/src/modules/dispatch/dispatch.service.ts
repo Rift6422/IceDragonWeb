@@ -36,9 +36,15 @@ export class DispatchService {
    *   5. 成功 → state.transition(CONFIRMED → DELIVERED)
    *   6. 失敗 → 看 attempt 次數,< 3 留 CONFIRMED 等重試,≥ 3 轉 DELIVERY_FAILED
    *
+   * @param orderId 訂單 id
+   * @param opts.force true = 跳過冪等檢查強制重新派發(後台「強制重派」用,
+   *                   危險:可能讓玩家拿到第二份禮包。前端必須二次確認)
    * @returns 是否成功派發
    */
-  async tryDispatch(orderId: string): Promise<{ ok: boolean; status: OrderStatus }> {
+  async tryDispatch(
+    orderId: string,
+    opts: { force?: boolean } = {},
+  ): Promise<{ ok: boolean; status: OrderStatus }> {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: {
@@ -52,18 +58,28 @@ export class DispatchService {
 
     if (!order) throw new Error(`Order ${orderId} not found`);
 
-    // 已派發成功 → 冪等,跳過(防補儲多次觸發重派)
-    if (order.deliveryAttempts.length > 0) {
+    // 已派發成功 → 冪等,跳過(force 時跳過此檢查)
+    if (!opts.force && order.deliveryAttempts.length > 0) {
       this.logger.log(`Order ${order.facTradeSeq} 已派發成功過,跳過`);
       return { ok: true, status: order.status };
     }
 
-    // 只能在 CONFIRMED 派發
-    if (order.status !== OrderStatus.CONFIRMED && order.status !== OrderStatus.DELIVERY_FAILED) {
+    // 只能在 CONFIRMED / DELIVERY_FAILED / DELIVERED(force)派發
+    if (
+      !opts.force &&
+      order.status !== OrderStatus.CONFIRMED &&
+      order.status !== OrderStatus.DELIVERY_FAILED
+    ) {
       this.logger.warn(
         `Order ${order.facTradeSeq} 狀態為 ${order.status},非 CONFIRMED/DELIVERY_FAILED,跳過派發`,
       );
       return { ok: false, status: order.status };
+    }
+
+    if (opts.force) {
+      this.logger.warn(
+        `Order ${order.facTradeSeq} 強制重派(force=true) — 目前 status=${order.status}, prev success attempts=${order.deliveryAttempts.length}`,
+      );
     }
 
     // 組 payload
@@ -117,13 +133,20 @@ export class DispatchService {
     });
 
     if (result.ok) {
-      await this.state.transition({
-        orderId: order.id,
-        toStatus: OrderStatus.DELIVERED,
-        triggeredBy: 'system',
-        reason: `Dispatched (attempt #${attemptNumber}, mail_id=${result.mailId ?? 'unknown'})`,
-        metadata: { mail_id: result.mailId ?? null, attempt: attemptNumber },
-      });
+      // 已是 DELIVERED 的 force 重派,不再 transition(避免 DELIVERED→DELIVERED 同態轉換 throw)
+      if (order.status !== OrderStatus.DELIVERED) {
+        await this.state.transition({
+          orderId: order.id,
+          toStatus: OrderStatus.DELIVERED,
+          triggeredBy: 'system',
+          reason: `Dispatched (attempt #${attemptNumber}, mail_id=${result.mailId ?? 'unknown'})`,
+          metadata: { mail_id: result.mailId ?? null, attempt: attemptNumber },
+        });
+      } else {
+        this.logger.log(
+          `Order ${order.facTradeSeq} force re-dispatched while already DELIVERED, no state change`,
+        );
+      }
       return { ok: true, status: OrderStatus.DELIVERED };
     }
 

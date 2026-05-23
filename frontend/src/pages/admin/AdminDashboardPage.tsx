@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { fetchDashboard } from '@/api/admin';
+import { orderStatusColor, orderStatusLabel } from '@/utils/statusLabel';
 
 function StatCard({
   label,
@@ -61,7 +62,7 @@ export function AdminDashboardPage() {
             }
             hint={
               Object.entries(data.today.by_status)
-                .map(([k, v]) => `${k}: ${v}`)
+                .map(([k, v]) => `${orderStatusLabel(k)}: ${v}`)
                 .join(' / ') || undefined
             }
           />
@@ -130,7 +131,11 @@ export function AdminDashboardPage() {
                         {o.fac_trade_seq}
                       </Link>
                     </td>
-                    <td className="px-4 py-2 text-xs">{o.status}</td>
+                    <td className="px-4 py-2 text-xs">
+                      <span className={`rounded px-2 py-0.5 text-xs font-medium ${orderStatusColor(o.status)}`}>
+                        {orderStatusLabel(o.status)}
+                      </span>
+                    </td>
                     <td className="px-4 py-2 text-right">NT$ {o.amount}</td>
                     <td className="px-4 py-2 text-xs text-slate-500">{new Date(o.created_at).toLocaleString('zh-TW')}</td>
                   </tr>

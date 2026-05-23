@@ -291,12 +291,28 @@ export class MyCardCallbackService {
    *
    * 回傳當下訂單狀態,呼叫端可據此判斷補儲是否成功推進。
    */
-  async forceReprocess(facTradeSeq: string): Promise<{ ok: boolean; status: OrderStatus | null; message: string }> {
+  async forceReprocess(
+    facTradeSeq: string,
+    opts: { force?: boolean } = {},
+  ): Promise<{ ok: boolean; status: OrderStatus | null; message: string }> {
     const before = await this.prisma.order.findUnique({ where: { facTradeSeq } });
     if (!before) {
       return { ok: false, status: null, message: 'Order not found' };
     }
+
     try {
+      // force=true 模式:已 DELIVERED 也要再呼叫一次派發(後台「強制重派」)
+      // 走 dispatch 而非 reprocessOne,因為 reprocessOne 內 status=DELIVERED 會 return
+      if (opts.force && before.status === OrderStatus.DELIVERED) {
+        this.logger.warn(`forceReprocess: ${facTradeSeq} status=DELIVERED but force=true → re-dispatch`);
+        await this.dispatch.tryDispatch(before.id, { force: true });
+        const after = await this.prisma.order.findUnique({ where: { facTradeSeq } });
+        return {
+          ok: true,
+          status: after?.status ?? before.status,
+          message: `強制重派完成(status 維持 ${after?.status ?? before.status})`,
+        };
+      }
       await this.reprocessOne(facTradeSeq);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

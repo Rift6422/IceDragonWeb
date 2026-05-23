@@ -20,9 +20,7 @@ import { extractErrorMessage } from '@/api/client';
 // ============================================================
 
 interface ProductFormState {
-  code: string;
   name_display: string;
-  name_internal: string;
   amount: string;
   sort_order: string;
   status: 'ACTIVE' | 'INACTIVE';
@@ -33,9 +31,7 @@ interface ProductFormState {
 }
 
 const EMPTY_FORM: ProductFormState = {
-  code: '',
   name_display: '',
-  name_internal: '',
   amount: '',
   sort_order: '0',
   status: 'ACTIVE',
@@ -301,12 +297,20 @@ function ProductFormModal({
     e.preventDefault();
     setValidationErr(null);
 
-    if (mode === 'create' && !/^[A-Z0-9_]+$/.test(form.code)) {
-      setValidationErr('Code 必須是 UPPER_SNAKE_CASE(A-Z 0-9 _)');
+    const playfabItemId = form.playfab_item_id.trim();
+    if (mode === 'create' && !playfabItemId) {
+      setValidationErr('PlayFab itemId 必填(會被當作商品 code 使用)');
       return;
     }
-    if (!form.name_display || !form.name_internal) {
-      setValidationErr('顯示名稱與內部名稱必填');
+    // 新建商品時 code = playfab_item_id 大寫(後端 schema 要求 UPPER_SNAKE_CASE)
+    // 編輯既有商品時 code 不可改(訂單 FK 依賴),維持原值
+    const code = mode === 'create' ? playfabItemId.toUpperCase() : product!.code;
+    if (mode === 'create' && !/^[A-Z0-9_]+$/.test(code)) {
+      setValidationErr('PlayFab itemId 只能含英數與底線(會被轉成 UPPER_SNAKE_CASE 當 code)');
+      return;
+    }
+    if (!form.name_display) {
+      setValidationErr('顯示名稱必填');
       return;
     }
     if (!/^\d+(\.\d{1,2})?$/.test(form.amount)) {
@@ -328,14 +332,15 @@ function ProductFormModal({
     else delete effectsJson.purchase_limit_label;
 
     onSave({
-      code: form.code,
+      code,
+      // 內部名稱不再分離,直接同步顯示名稱(後台 / 對帳查詢仍可用)
       name_display: form.name_display,
-      name_internal: form.name_internal,
+      name_internal: form.name_display,
       amount: form.amount,
       sort_order: parseInt(form.sort_order, 10) || 0,
       status: form.status,
       effects: effectsJson,
-      playfab_item_id: form.playfab_item_id.trim() || undefined,
+      playfab_item_id: playfabItemId || undefined,
       playfab_store_id: form.playfab_store_id.trim() || undefined,
     });
   };
@@ -366,16 +371,16 @@ function ProductFormModal({
         <form onSubmit={submit} className="space-y-5 px-5 py-4">
           {/* 基本資料 */}
           <Section title="基本資料">
-            <Field label="Code(UPPER_SNAKE_CASE)" hint="例:DIAMOND_200、BUNDLE_DAILY">
-              <input
-                type="text"
-                value={form.code}
-                onChange={(e) => update('code', e.target.value.toUpperCase())}
-                className="input font-mono"
-                disabled={mode === 'edit'}
-                placeholder="BUNDLE_NEW"
-              />
-            </Field>
+            {mode === 'edit' && (
+              <Field label="Code(自動由 PlayFab itemId 產生,不可改)">
+                <input
+                  type="text"
+                  value={product?.code ?? ''}
+                  className="input font-mono"
+                  disabled
+                />
+              </Field>
+            )}
             <Field label="顯示名稱(玩家看到)">
               <input
                 type="text"
@@ -384,16 +389,6 @@ function ProductFormModal({
                 className="input"
                 placeholder="新手啟源包"
                 maxLength={100}
-              />
-            </Field>
-            <Field label="內部名稱(後台 / 對帳用)">
-              <input
-                type="text"
-                value={form.name_internal}
-                onChange={(e) => update('name_internal', e.target.value)}
-                className="input"
-                placeholder="新手啟源包(限購一次)"
-                maxLength={200}
               />
             </Field>
             <div className="grid grid-cols-3 gap-3">
@@ -478,10 +473,7 @@ function ProductFormModal({
           {/* PlayFab 對應 */}
           <Section title="PlayFab 對應(限購由遊戲端控管)">
             <div className="grid grid-cols-2 gap-3">
-              <Field
-                label="PlayFab itemId"
-                hint="對應 PlayFab catalog item。空 = 不查限購,所有玩家都能買"
-              >
+              <Field label="PlayFab itemId">
                 <input
                   type="text"
                   value={form.playfab_item_id}
@@ -489,12 +481,10 @@ function ProductFormModal({
                   className="input font-mono"
                   placeholder="all_time_pack_1"
                   maxLength={64}
+                  disabled={mode === 'edit'}
                 />
               </Field>
-              <Field
-                label="PlayFab storeID"
-                hint="空 = 用環境變數預設(GAME_BACKEND_STORE_ID)"
-              >
+              <Field label="PlayFab storeID">
                 <input
                   type="text"
                   value={form.playfab_store_id}
@@ -571,9 +561,7 @@ interface ProductEffectsShape {
 function productToForm(p: AdminProduct): ProductFormState {
   const e = (p.effects ?? {}) as ProductEffectsShape;
   return {
-    code: p.code,
     name_display: p.nameDisplay,
-    name_internal: p.nameInternal,
     amount: String(p.amount),
     sort_order: String(p.sortOrder),
     status: p.status,
