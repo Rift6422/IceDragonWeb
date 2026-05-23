@@ -215,6 +215,34 @@ export class MyCardCallbackService {
   }
 
   /**
+   * 對外公開:手動觸發某張單的補儲流程(等同 MyCard 主動推 supplement)。
+   *
+   * 用途:
+   *   - 因網路 / IP 白名單問題導致 callback 漏接,後台手動補救
+   *   - QA 在沒等 MyCard 真實 supplement(~20 min)前先驗證流程
+   *
+   * 回傳當下訂單狀態,呼叫端可據此判斷補儲是否成功推進。
+   */
+  async forceReprocess(facTradeSeq: string): Promise<{ ok: boolean; status: OrderStatus | null; message: string }> {
+    const before = await this.prisma.order.findUnique({ where: { facTradeSeq } });
+    if (!before) {
+      return { ok: false, status: null, message: 'Order not found' };
+    }
+    try {
+      await this.reprocessOne(facTradeSeq);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, status: before.status, message: `reprocessOne threw: ${msg}` };
+    }
+    const after = await this.prisma.order.findUnique({ where: { facTradeSeq } });
+    return {
+      ok: true,
+      status: after?.status ?? before.status,
+      message: `${before.status} → ${after?.status ?? '(unchanged)'}`,
+    };
+  }
+
+  /**
    * 單筆補儲處理:打 TradeQuery + PaymentConfirm + 派發
    */
   private async reprocessOne(facTradeSeq: string): Promise<void> {

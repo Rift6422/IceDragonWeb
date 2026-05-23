@@ -11,5 +11,6 @@ import { DispatchModule } from '../dispatch/dispatch.module';
   imports: [OrdersModule, MyCardModule, DispatchModule],
   controllers: [MyCardCallbackController, MyCardTradeReturnController],
   providers: [MyCardCallbackService, MyCardSourceGuard],
+  exports: [MyCardCallbackService],
 })
 export class CallbackModule {}

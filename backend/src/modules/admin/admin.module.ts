@@ -16,6 +16,7 @@ import { AdminAuditService } from './audit/admin-audit.service';
 
 import { AdminJwtGuard } from '../../common/guards/admin-jwt.guard';
 import { AdminIpWhitelistGuard } from '../../common/guards/admin-ip-whitelist.guard';
+import { CallbackModule } from '../callback/callback.module';
 
 /**
  * Admin 後台模組
@@ -53,6 +54,7 @@ import { AdminIpWhitelistGuard } from '../../common/guards/admin-ip-whitelist.gu
         },
       }),
     }),
+    CallbackModule, // AdminOrdersController.retryCallback 用 MyCardCallbackService
   ],
   controllers: [
     AdminAuthController,
