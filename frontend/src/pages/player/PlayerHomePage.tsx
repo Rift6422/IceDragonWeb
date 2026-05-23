@@ -9,8 +9,8 @@ import {
   verifyPlayerUid,
   type OrderStatus,
   type PlayerOrderDetail,
-  type ProductCategory,
   type ProductEffect,
+  type PublicCategory,
   type PublicProduct,
 } from '@/api/player';
 import { isValidUid, normalizeUid, usePlayerStore } from '@/features/player/uid.store';
@@ -23,12 +23,9 @@ import { isValidUid, normalizeUid, usePlayerStore } from '@/features/player/uid.
  * Deep link `/?uid=...&item=...` 會自動 setIdentity + 後續開 modal。
  */
 
-const TAB_LABELS: Record<ProductCategory, string> = {
-  BUNDLE: '超值禮包',
-  CURRENCY: '啟源石',
-};
-
-const TAB_ORDER: ProductCategory[] = ['BUNDLE', 'CURRENCY'];
+/** 沒分類(舊資料 / 後台未指定)時的 fallback */
+const UNCATEGORIZED_KEY = '__uncategorized__';
+const UNCATEGORIZED_LABEL = '其他';
 
 const EFFECT_FALLBACK_NAMES: Record<string, string> = {
   DIAMOND: '啟源石',
@@ -47,7 +44,9 @@ const DEFAULT_BUNDLE_ICON = '/icons/bundle-default.jpg';
 const DEFAULT_CURRENCY_ICON = '/icons/stone-default.jpg';
 
 function productIcon(p: PublicProduct): string {
-  return p.effects.icon ?? (p.category === 'BUNDLE' ? DEFAULT_BUNDLE_ICON : DEFAULT_CURRENCY_ICON);
+  if (p.effects.icon) return p.effects.icon;
+  // Fallback by category code(BUNDLE → bundle 預設,其他 / CURRENCY / 沒分類 → 啟源石預設)
+  return p.category?.code === 'BUNDLE' ? DEFAULT_BUNDLE_ICON : DEFAULT_CURRENCY_ICON;
 }
 
 export function isImageIcon(s: string): boolean {
@@ -248,7 +247,8 @@ function ProductsScreen({
   paidResultHint: string;
   onChangeUid: () => void;
 }) {
-  const [tab, setTab] = useState<ProductCategory>('BUNDLE');
+  /** 目前選的分類 id(或 UNCATEGORIZED_KEY)。空字串 = 還沒拿到資料前的初始值 */
+  const [tab, setTab] = useState<string>('');
   const [selected, setSelected] = useState<PublicProduct | null>(null);
   const [, setSearchParams] = useSearchParams();
   const deepLinkOpenedRef = useRef(false);
@@ -290,23 +290,54 @@ function ProductsScreen({
     staleTime: 5_000, // 短快取:限購狀態要新鮮
   });
 
+  // 算 tabs:後台啟用中的 categories + 「其他」(只有當有商品沒分類時才顯示)
+  const tabs = useMemo<PublicCategory[]>(() => {
+    if (!data) return [];
+    const categories = data.categories ?? [];
+    const hasUncategorized = (data.items ?? []).some((p) => !p.category);
+    if (hasUncategorized) {
+      return [
+        ...categories,
+        {
+          id: UNCATEGORIZED_KEY,
+          code: UNCATEGORIZED_KEY,
+          display_name: UNCATEGORIZED_LABEL,
+          sort_order: 99999,
+        },
+      ];
+    }
+    return categories;
+  }, [data]);
+
+  // 初始化:第一次拿到 data 時,把 tab 設成第一個分類
+  useEffect(() => {
+    if (tab) return;
+    if (tabs.length > 0) setTab(tabs[0].id);
+  }, [tab, tabs]);
+
+  // 依分類分桶
+  const buckets = useMemo<Record<string, PublicProduct[]>>(() => {
+    const map: Record<string, PublicProduct[]> = {};
+    for (const t of tabs) map[t.id] = [];
+    for (const p of data?.items ?? []) {
+      const key = p.category?.id ?? UNCATEGORIZED_KEY;
+      if (!map[key]) map[key] = [];
+      map[key].push(p);
+    }
+    return map;
+  }, [data, tabs]);
+
   // Deep link item:自動切 tab + 開 modal(只一次)
   useEffect(() => {
     if (deepLinkOpenedRef.current) return;
     if (!deepLinkItem || !data?.items) return;
     const found = data.items.find((p) => p.code === deepLinkItem);
     if (found) {
-      setTab(found.category);
+      setTab(found.category?.id ?? UNCATEGORIZED_KEY);
       setSelected(found);
       deepLinkOpenedRef.current = true;
     }
   }, [deepLinkItem, data]);
-
-  const buckets = useMemo(() => {
-    const init: Record<ProductCategory, PublicProduct[]> = { BUNDLE: [], CURRENCY: [] };
-    (data?.items ?? []).forEach((p) => init[p.category].push(p));
-    return init;
-  }, [data]);
 
   // redirecting:purchase 成功後保持 loading 直到 window.location 真正換頁
   // (避免 onSuccess 跑完 → isPending = false → overlay 消失 → 0.x 秒後才導頁的閃爍)
@@ -361,15 +392,15 @@ function ProductsScreen({
           className="-mx-1 flex gap-1 overflow-x-auto border-b border-slate-200 px-1"
           role="tablist"
         >
-          {TAB_ORDER.map((t) => {
-            const active = t === tab;
-            const count = buckets[t]?.length ?? 0;
+          {tabs.map((t) => {
+            const active = t.id === tab;
+            const count = buckets[t.id]?.length ?? 0;
             return (
               <button
-                key={t}
+                key={t.id}
                 role="tab"
                 aria-selected={active}
-                onClick={() => setTab(t)}
+                onClick={() => setTab(t.id)}
                 className={
                   'whitespace-nowrap border-b-2 px-3 py-2.5 text-sm font-medium transition-colors sm:px-4 sm:py-3 ' +
                   (active
@@ -377,7 +408,7 @@ function ProductsScreen({
                     : 'border-transparent text-slate-500 hover:text-slate-800')
                 }
               >
-                {TAB_LABELS[t]}
+                {t.display_name}
                 <span className="ml-1 text-xs text-slate-400">({count})</span>
               </button>
             );
@@ -392,11 +423,11 @@ function ProductsScreen({
         <div className="card text-sm text-rose-600">
           載入失敗:{extractErrorMessage(error)}
         </div>
-      ) : buckets[tab].length === 0 ? (
+      ) : (buckets[tab] ?? []).length === 0 ? (
         <div className="card text-sm text-slate-400">此分類目前沒有上架商品</div>
       ) : (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 lg:grid-cols-4">
-          {buckets[tab].map((p) => (
+          {(buckets[tab] ?? []).map((p) => (
             <ProductCard key={p.id} product={p} onClick={() => setSelected(p)} />
           ))}
         </div>
@@ -835,15 +866,6 @@ function periodPrefix(p: NonNullable<PublicProduct['limitation']>['limit_period'
   }
 }
 
-// reset 時間用 UTC,顯示給玩家轉成台北時間
-function formatResetAt(iso: string): string {
-  const d = new Date(iso);
-  const m = d.getMonth() + 1;
-  const day = d.getDate();
-  const hh = d.getHours().toString().padStart(2, '0');
-  return `${m}/${day} ${hh}:00`;
-}
-
 // ============================================================
 // ProductDetailModal
 // ============================================================
@@ -901,11 +923,6 @@ function ProductDetailModal({
                 }
               >
                 {badge}
-                {product.limitation?.reset_at && !soldOut && (
-                  <span className="ml-1 text-amber-600">
-                    · {formatResetAt(product.limitation.reset_at)} 重置
-                  </span>
-                )}
               </div>
             );
           })()}

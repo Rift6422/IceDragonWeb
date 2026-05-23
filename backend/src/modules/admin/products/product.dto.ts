@@ -77,6 +77,11 @@ export class CreateProductDto {
   @IsString()
   @MaxLength(64)
   playfab_store_id?: string;
+
+  /** 分類 ID(uuid)— 玩家前台 tab 用 */
+  @IsOptional()
+  @IsString()
+  category_id?: string;
 }
 
 export class UpdateProductDto {
@@ -135,6 +140,10 @@ export class UpdateProductDto {
   @IsString()
   @MaxLength(64)
   playfab_store_id?: string;
+
+  @IsOptional()
+  @IsString()
+  category_id?: string;
 }
 
 export class ListProductsDto {

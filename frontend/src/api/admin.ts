@@ -175,6 +175,7 @@ export interface AdminProduct {
   sortOrder: number;
   playfabItemId: string | null;
   playfabStoreId: string | null;
+  categoryId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -202,6 +203,7 @@ export interface CreateProductInput {
   sort_order?: number;
   playfab_item_id?: string;
   playfab_store_id?: string;
+  category_id?: string;
 }
 
 export async function createProduct(input: CreateProductInput): Promise<AdminProduct> {
@@ -219,6 +221,56 @@ export async function updateProduct(
 
 export async function deactivateProduct(id: string): Promise<AdminProduct> {
   const { data } = await api.delete<AdminProduct>(`/api/admin/products/${id}`);
+  return data;
+}
+
+// ============================================================
+// Categories(商品分類)
+// ============================================================
+
+export interface AdminCategory {
+  id: string;
+  code: string;
+  displayName: string;
+  sortOrder: number;
+  status: 'ACTIVE' | 'INACTIVE';
+  product_count: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminCategoriesResponse {
+  total: number;
+  items: AdminCategory[];
+}
+
+export async function fetchCategories(): Promise<AdminCategoriesResponse> {
+  const { data } = await api.get<AdminCategoriesResponse>('/api/admin/categories');
+  return data;
+}
+
+export interface CreateCategoryInput {
+  code: string;
+  display_name: string;
+  sort_order?: number;
+  status?: 'ACTIVE' | 'INACTIVE';
+}
+
+export async function createCategory(input: CreateCategoryInput): Promise<AdminCategory> {
+  const { data } = await api.post<AdminCategory>('/api/admin/categories', input);
+  return data;
+}
+
+export async function updateCategory(
+  id: string,
+  patch: Partial<Omit<CreateCategoryInput, 'code'>>,
+): Promise<AdminCategory> {
+  const { data } = await api.patch<AdminCategory>(`/api/admin/categories/${id}`, patch);
+  return data;
+}
+
+export async function deactivateCategory(id: string): Promise<AdminCategory> {
+  const { data } = await api.delete<AdminCategory>(`/api/admin/categories/${id}`);
   return data;
 }
 

@@ -67,6 +67,25 @@ enum ProductStatus {
   @@map("product_status")
 }
 
+/// 商品分類 — 玩家前台 tab、後台分類管理
+model Category {
+  id          String          @id @default(uuid()) @db.Uuid
+  /// 內部 code(UPPER_SNAKE_CASE,例:BUNDLE / CURRENCY)
+  code        String          @unique
+  /// 玩家看到的顯示名稱(例:超值禮包、啟源石)
+  displayName String          @map("display_name")
+  /// 排序(小到大),tab 順序用
+  sortOrder   Int             @default(0) @map("sort_order")
+  status      ProductStatus   @default(ACTIVE)
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt   DateTime        @updatedAt @map("updated_at") @db.Timestamptz()
+
+  products    Product[]
+
+  @@index([status, sortOrder])
+  @@map("categories")
+}
+
 model Product {
   id             String        @id @default(uuid()) @db.Uuid
   /// 內部商品代碼,如 DIAMOND_150
@@ -87,6 +106,9 @@ model Product {
   playfabItemId  String?       @map("playfab_item_id")
   /// PlayFab storeID — 限購查詢時帶入。空時用 GAME_BACKEND_STORE_ID 環境變數
   playfabStoreId String?       @map("playfab_store_id")
+  /// 分類 FK — 空時 fallback by code prefix(BUNDLE_* → 超值禮包,其餘 → 啟源石)
+  categoryId     String?       @map("category_id") @db.Uuid
+  category       Category?     @relation(fields: [categoryId], references: [id])
   status         ProductStatus @default(ACTIVE)
   sortOrder      Int           @default(0) @map("sort_order")
   createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz()
@@ -96,6 +118,7 @@ model Product {
 
   @@index([status, sortOrder])
   @@index([playfabItemId])
+  @@index([categoryId])
   @@map("products")
 }
 

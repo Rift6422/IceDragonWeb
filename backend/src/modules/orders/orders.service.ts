@@ -102,8 +102,7 @@ export class OrdersService {
       );
       if (limit && limit.left_quantity <= 0) {
         throw new BadRequestException(
-          `此商品已達購買上限(${limit.max_quantity}/${limit.max_quantity})` +
-            (limit.reset_at ? `,將於 ${limit.reset_at} 重置` : ''),
+          `此商品已達購買上限(${limit.max_quantity}/${limit.max_quantity})`,
         );
       }
     }

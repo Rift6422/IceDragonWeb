@@ -4,7 +4,12 @@ import { api } from './client';
 // 公開商品(玩家前台,無需登入)
 // ============================================================
 
-export type ProductCategory = 'BUNDLE' | 'CURRENCY';
+export interface PublicCategory {
+  id: string;
+  code: string;
+  display_name: string;
+  sort_order: number;
+}
 
 export interface ProductEffect {
   type: string;
@@ -42,7 +47,7 @@ export interface PublicProduct {
   currency: string;
   effects: ProductEffectsJson;
   sort_order: number;
-  category: ProductCategory;
+  category: PublicCategory | null;
   purchase_limit_label?: string | null;
   /** PlayFab itemId(若有設,代表有限購) */
   playfab_item_id?: string | null;
@@ -52,6 +57,8 @@ export interface PublicProduct {
 
 export interface PublicProductsResponse {
   total: number;
+  /** 動態分類(後台可改),依 sort_order 排好 */
+  categories: PublicCategory[];
   items: PublicProduct[];
 }
 

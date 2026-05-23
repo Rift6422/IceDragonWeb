@@ -48,6 +48,7 @@ export class AdminProductsService {
         sortOrder: dto.sort_order ?? 0,
         playfabItemId: dto.playfab_item_id ?? null,
         playfabStoreId: dto.playfab_store_id ?? null,
+        categoryId: dto.category_id ?? null,
       },
     });
   }
@@ -68,6 +69,7 @@ export class AdminProductsService {
         sortOrder: dto.sort_order,
         playfabItemId: dto.playfab_item_id,
         playfabStoreId: dto.playfab_store_id,
+        categoryId: dto.category_id,
       },
     });
   }

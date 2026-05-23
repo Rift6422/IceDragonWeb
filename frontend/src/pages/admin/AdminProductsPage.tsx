@@ -3,8 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   createProduct,
   deactivateProduct,
+  fetchCategories,
   fetchProducts,
   updateProduct,
+  type AdminCategory,
   type AdminProduct,
   type CreateProductInput,
 } from '@/api/admin';
@@ -28,6 +30,7 @@ interface ProductFormState {
   purchase_limit_label: string;
   playfab_item_id: string;
   playfab_store_id: string;
+  category_id: string;
 }
 
 const EMPTY_FORM: ProductFormState = {
@@ -39,6 +42,7 @@ const EMPTY_FORM: ProductFormState = {
   purchase_limit_label: '',
   playfab_item_id: '',
   playfab_store_id: '',
+  category_id: '',
 };
 
 function isImageIcon(s: string): boolean {
@@ -53,6 +57,15 @@ export function AdminProductsPage() {
     queryKey: ['admin', 'products'],
     queryFn: () => fetchProducts({ limit: 200 }),
   });
+
+  // 分類給 modal 內的下拉用;一併載入提升 UX
+  const { data: categoryData } = useQuery({
+    queryKey: ['admin', 'categories'],
+    queryFn: fetchCategories,
+  });
+  const activeCategories: AdminCategory[] = (categoryData?.items ?? []).filter(
+    (c) => c.status === 'ACTIVE',
+  );
 
   const createMut = useMutation({
     mutationFn: (input: CreateProductInput) => createProduct(input),
@@ -210,6 +223,7 @@ export function AdminProductsPage() {
         <ProductFormModal
           mode={editing.mode}
           product={editing.product}
+          categories={activeCategories}
           submitting={submitting}
           error={error}
           onSave={onSave}
@@ -277,6 +291,7 @@ function CopyLinkButton({ code }: { code: string }) {
 function ProductFormModal({
   mode,
   product,
+  categories,
   submitting,
   error,
   onSave,
@@ -284,6 +299,7 @@ function ProductFormModal({
 }: {
   mode: 'create' | 'edit';
   product?: AdminProduct;
+  categories: AdminCategory[];
   submitting: boolean;
   error: string | null;
   onSave: (input: CreateProductInput) => void;
@@ -321,6 +337,10 @@ function ProductFormModal({
       setValidationErr('顯示名稱必填');
       return;
     }
+    if (!form.category_id) {
+      setValidationErr('商品分類必填');
+      return;
+    }
     if (!/^\d+(\.\d{1,2})?$/.test(form.amount)) {
       setValidationErr('金額格式錯誤');
       return;
@@ -350,6 +370,7 @@ function ProductFormModal({
       effects: effectsJson,
       playfab_item_id: playfabItemId || undefined,
       playfab_store_id: form.playfab_store_id.trim() || undefined,
+      category_id: form.category_id || undefined,
     });
   };
 
@@ -397,7 +418,23 @@ function ProductFormModal({
                 className="input"
                 placeholder="新手啟源包"
                 maxLength={100}
+                required
               />
+            </Field>
+            <Field label="商品分類(必填)" hint="若清單空白,請先到「商品分類」頁建立">
+              <select
+                value={form.category_id}
+                onChange={(e) => update('category_id', e.target.value)}
+                className="input"
+                required
+              >
+                <option value="">— 請選擇 —</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.displayName}({c.code})
+                  </option>
+                ))}
+              </select>
             </Field>
             <div className="grid grid-cols-3 gap-3">
               <Field label="金額(TWD)">
@@ -578,5 +615,6 @@ function productToForm(p: AdminProduct): ProductFormState {
     purchase_limit_label: e.purchase_limit_label ?? '',
     playfab_item_id: p.playfabItemId ?? '',
     playfab_store_id: p.playfabStoreId ?? '',
+    category_id: p.categoryId ?? '',
   };
 }

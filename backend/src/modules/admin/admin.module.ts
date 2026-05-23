@@ -10,6 +10,8 @@ import { AdminOrdersController } from './orders/admin-orders.controller';
 import { AdminOrdersService } from './orders/admin-orders.service';
 import { AdminProductsController } from './products/admin-products.controller';
 import { AdminProductsService } from './products/admin-products.service';
+import { AdminCategoriesController } from './categories/admin-categories.controller';
+import { AdminCategoriesService } from './categories/admin-categories.service';
 import { AdminUsersController } from './users/admin-users.controller';
 import { AdminUsersService } from './users/admin-users.service';
 import { AdminAuditService } from './audit/admin-audit.service';
@@ -61,6 +63,7 @@ import { CallbackModule } from '../callback/callback.module';
     AdminDashboardController,
     AdminOrdersController,
     AdminProductsController,
+    AdminCategoriesController,
     AdminUsersController,
   ],
   providers: [
@@ -69,6 +72,7 @@ import { CallbackModule } from '../callback/callback.module';
     AdminDashboardService,
     AdminOrdersService,
     AdminProductsService,
+    AdminCategoriesService,
     AdminUsersService,
     AdminJwtGuard,
     AdminIpWhitelistGuard,

@@ -6,6 +6,7 @@ const nav = [
   { to: '/admin/dashboard', label: '儀表板' },
   { to: '/admin/orders', label: '訂單' },
   { to: '/admin/products', label: '商品' },
+  { to: '/admin/categories', label: '商品分類' },
   { to: '/admin/users', label: '玩家' },
 ];
 

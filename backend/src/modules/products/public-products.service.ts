@@ -4,7 +4,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { GameBackendService } from '../game-backend/game-backend.service';
 import type { ItemLimitation } from '../game-backend/game-backend.types';
 
-export type ProductCategory = 'BUNDLE' | 'CURRENCY';
+export interface PublicCategory {
+  id: string;
+  code: string;
+  display_name: string;
+  sort_order: number;
+}
 
 export interface PublicProduct {
   id: string;
@@ -14,23 +19,28 @@ export interface PublicProduct {
   currency: string;
   effects: unknown;
   sort_order: number;
-  /** 玩家前台分類:從 code 推導(BUNDLE_* → BUNDLE,其餘 → CURRENCY) */
-  category: ProductCategory;
+  /**
+   * 動態分類:從 Product.category 關聯帶出。
+   *
+   * 沒設定 category 的舊資料用 fallback:
+   *   BUNDLE_* / ALL_TIME_* / DAY_* / WEEK_* / MONTH_* → BUNDLE 分類
+   *   其他 → CURRENCY 分類
+   */
+  category: PublicCategory | null;
   /** 純展示用標籤,後端不強制,前端只當 badge 印 */
   purchase_limit_label?: string | null;
   /** PlayFab itemId(對應遊戲端商品)— 玩家不需要看到,但 admin 用得到 */
   playfab_item_id?: string | null;
-  /**
-   * 限購狀態(僅在 list/findByCode 帶 uid 時填入)
-   *
-   * - `null` = 沒對該玩家查(沒帶 uid)或商品無限購設定
-   * - 否則 = 對該玩家當前剩餘次數 / 重置時間
-   */
+  /** 限購狀態(僅在 list/findByCode 帶 uid 時填入) */
   limitation?: ItemLimitation | null;
 }
 
-function deriveCategory(code: string): ProductCategory {
-  return code.startsWith('BUNDLE_') ? 'BUNDLE' : 'CURRENCY';
+export interface PublicProductsResponse {
+  total: number;
+  /** 啟用中的分類(玩家前台 tab),依 sortOrder 排序 */
+  categories: PublicCategory[];
+  /** 商品(含 category 對應) */
+  items: PublicProduct[];
 }
 
 function extractLimitLabel(effects: unknown): string | null {
@@ -41,6 +51,11 @@ function extractLimitLabel(effects: unknown): string | null {
   return null;
 }
 
+function mapCategory(c: { id: string; code: string; displayName: string; sortOrder: number } | null): PublicCategory | null {
+  if (!c) return null;
+  return { id: c.id, code: c.code, display_name: c.displayName, sort_order: c.sortOrder };
+}
+
 @Injectable()
 export class PublicProductsService {
   constructor(
@@ -48,32 +63,36 @@ export class PublicProductsService {
     private readonly gameBackend: GameBackendService,
   ) {}
 
-  /**
-   * 列商品。若帶 uid 會多打一次 GameBackend 拿限購剩餘次數。
-   *
-   * uid 不存在玩家也沒關係 — GameBackend 端會回空 / 各 itemID 沒 entry → 顯示「未對接」狀態
-   */
-  async list(uid?: string): Promise<{ total: number; items: PublicProduct[] }> {
-    const items = await this.prisma.product.findMany({
-      where: { status: ProductStatus.ACTIVE },
-      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
-      select: {
-        id: true,
-        code: true,
-        nameDisplay: true,
-        amount: true,
-        currency: true,
-        effects: true,
-        sortOrder: true,
-        playfabItemId: true,
-        playfabStoreId: true,
-      },
-    });
+  async list(uid?: string): Promise<PublicProductsResponse> {
+    const [items, categories] = await Promise.all([
+      this.prisma.product.findMany({
+        where: { status: ProductStatus.ACTIVE },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          id: true,
+          code: true,
+          nameDisplay: true,
+          amount: true,
+          currency: true,
+          effects: true,
+          sortOrder: true,
+          playfabItemId: true,
+          playfabStoreId: true,
+          category: { select: { id: true, code: true, displayName: true, sortOrder: true } },
+        },
+      }),
+      this.prisma.category.findMany({
+        where: { status: ProductStatus.ACTIVE },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+        select: { id: true, code: true, displayName: true, sortOrder: true },
+      }),
+    ]);
 
     const limitationMap = await this.fetchLimitations(uid, items);
 
     return {
       total: items.length,
+      categories: categories.map((c) => mapCategory(c)!).filter(Boolean),
       items: items.map((p) => ({
         id: p.id,
         code: p.code,
@@ -82,7 +101,7 @@ export class PublicProductsService {
         currency: p.currency,
         effects: p.effects,
         sort_order: p.sortOrder,
-        category: deriveCategory(p.code),
+        category: mapCategory(p.category),
         purchase_limit_label: extractLimitLabel(p.effects),
         playfab_item_id: p.playfabItemId,
         limitation: p.playfabItemId ? (limitationMap.get(p.playfabItemId) ?? null) : null,
@@ -104,6 +123,7 @@ export class PublicProductsService {
         status: true,
         playfabItemId: true,
         playfabStoreId: true,
+        category: { select: { id: true, code: true, displayName: true, sortOrder: true } },
       },
     });
     if (!p || p.status !== ProductStatus.ACTIVE) {
@@ -127,19 +147,13 @@ export class PublicProductsService {
       currency: p.currency,
       effects: p.effects,
       sort_order: p.sortOrder,
-      category: deriveCategory(p.code),
+      category: mapCategory(p.category),
       purchase_limit_label: extractLimitLabel(p.effects),
       playfab_item_id: p.playfabItemId,
       limitation,
     };
   }
 
-  /**
-   * 取得整批商品對應的限購資訊(以 playfabItemId 為 key)。
-   *
-   * 為了減少對 GameBackend 的呼叫:**對同一 storeID 只打一次**,把整批拉回。
-   * 若商品分散在多個 storeID 各打一次。
-   */
   private async fetchLimitations(
     uid: string | undefined,
     products: Array<{ playfabItemId: string | null; playfabStoreId: string | null }>,
@@ -150,7 +164,6 @@ export class PublicProductsService {
     const productsWithPlayfab = products.filter((p) => p.playfabItemId);
     if (productsWithPlayfab.length === 0) return map;
 
-    // 同 storeID 一起查
     const stores = new Set(
       productsWithPlayfab.map((p) => p.playfabStoreId ?? '__default__'),
     );

@@ -6,6 +6,7 @@ import { AdminDashboardPage } from './pages/admin/AdminDashboardPage';
 import { AdminOrdersPage } from './pages/admin/AdminOrdersPage';
 import { AdminOrderDetailPage } from './pages/admin/AdminOrderDetailPage';
 import { AdminProductsPage } from './pages/admin/AdminProductsPage';
+import { AdminCategoriesPage } from './pages/admin/AdminCategoriesPage';
 import { AdminUsersPage } from './pages/admin/AdminUsersPage';
 import { PlayerHomePage } from './pages/player/PlayerHomePage';
 import { PlayerOrdersPage } from './pages/player/PlayerOrdersPage';
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="orders" element={<AdminOrdersPage />} />
         <Route path="orders/:id" element={<AdminOrderDetailPage />} />
         <Route path="products" element={<AdminProductsPage />} />
+        <Route path="categories" element={<AdminCategoriesPage />} />
         <Route path="users" element={<AdminUsersPage />} />
       </Route>
 
