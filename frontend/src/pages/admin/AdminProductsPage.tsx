@@ -116,13 +116,13 @@ export function AdminProductsPage() {
           <table className="min-w-full divide-y divide-slate-200 text-sm">
             <thead className="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
-                <th className="px-3 py-2 text-left">code</th>
+                <th className="px-3 py-2 text-left">PlayFab itemId</th>
                 <th className="px-3 py-2 text-left">圖示</th>
                 <th className="px-3 py-2 text-left">顯示名稱</th>
                 <th className="px-3 py-2 text-left">限購</th>
                 <th className="px-3 py-2 text-right">金額</th>
                 <th className="px-3 py-2 text-center">狀態</th>
-                <th className="px-3 py-2 text-center">sort</th>
+                <th className="px-3 py-2 text-center">排序</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
@@ -134,7 +134,15 @@ export function AdminProductsPage() {
                 };
                 return (
                   <tr key={p.id} className="hover:bg-slate-50">
-                    <td className="px-3 py-2 font-mono text-xs">{p.code}</td>
+                    <td className="px-3 py-2 font-mono text-xs">
+                      {p.playfabItemId ? (
+                        <span className="text-slate-700">{p.playfabItemId}</span>
+                      ) : (
+                        <span className="text-rose-500" title="缺 PlayFab itemId,玩家無法購買">
+                          (未設定)
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2">
                       {effects.icon ? (
                         isImageIcon(effects.icon) ? (
@@ -175,7 +183,7 @@ export function AdminProductsPage() {
                       {p.status === 'ACTIVE' ? (
                         <button
                           onClick={() => {
-                            if (confirm(`確定下架 ${p.code}?`)) deactivateMut.mutate(p.id);
+                            if (confirm(`確定下架 ${p.playfabItemId || p.code}?`)) deactivateMut.mutate(p.id);
                           }}
                           className="text-red-600 hover:underline"
                         >
@@ -298,8 +306,8 @@ function ProductFormModal({
     setValidationErr(null);
 
     const playfabItemId = form.playfab_item_id.trim();
-    if (mode === 'create' && !playfabItemId) {
-      setValidationErr('PlayFab itemId 必填(會被當作商品 code 使用)');
+    if (!playfabItemId) {
+      setValidationErr('PlayFab itemId 必填 — 沒這個玩家無法購買、限購也查不到');
       return;
     }
     // 新建商品時 code = playfab_item_id 大寫(後端 schema 要求 UPPER_SNAKE_CASE)
@@ -473,7 +481,7 @@ function ProductFormModal({
           {/* PlayFab 對應 */}
           <Section title="PlayFab 對應(限購由遊戲端控管)">
             <div className="grid grid-cols-2 gap-3">
-              <Field label="PlayFab itemId">
+              <Field label="PlayFab itemId(必填)">
                 <input
                   type="text"
                   value={form.playfab_item_id}
@@ -482,6 +490,7 @@ function ProductFormModal({
                   placeholder="all_time_pack_1"
                   maxLength={64}
                   disabled={mode === 'edit'}
+                  required
                 />
               </Field>
               <Field label="PlayFab storeID">

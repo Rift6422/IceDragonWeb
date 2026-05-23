@@ -88,7 +88,7 @@ export function AdminDashboardPage() {
             label="超時未付款"
             value={data.attention.stale_authed_count}
             tone={data.attention.stale_authed_count > 0 ? 'warning' : 'default'}
-            hint="AUTHED 超過 30 分"
+            hint="已授權 30 分以上未完成"
           />
         </div>
       </section>
