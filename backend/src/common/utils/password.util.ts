@@ -11,8 +11,8 @@ const BCRYPT_COST = 10;
 
 /** Hash 密碼(只在 admin 帳號建立 / 改密碼時呼叫) */
 export async function hashPassword(plain: string): Promise<string> {
-  if (!plain || plain.length < 8) {
-    throw new Error('Password must be at least 8 characters');
+  if (!plain) {
+    throw new Error('Password must not be empty');
   }
   return bcrypt.hash(plain, BCRYPT_COST);
 }

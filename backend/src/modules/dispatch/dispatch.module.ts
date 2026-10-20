@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { OrdersModule } from '../orders/orders.module';
+import { FbCapiModule } from '../fb-capi/fb-capi.module';
 import { DispatchService } from './dispatch.service';
 import { MockMailDispatcher } from './mock-mail-dispatcher.service';
 import { GameBackendMailDispatcher } from './game-backend-mail-dispatcher.service';
@@ -15,7 +16,7 @@ import { MAIL_DISPATCHER } from './mail-dispatcher.interface';
  * MockMailDispatcher 保留作 provider,測試或手動切換時用。
  */
 @Module({
-  imports: [OrdersModule],
+  imports: [OrdersModule, FbCapiModule],
   providers: [
     DispatchService,
     MockMailDispatcher,

@@ -62,11 +62,9 @@ export class MyCardCallbackService {
       where: { id: log.id },
       data: { hashValid },
     });
-    if (!hashValid) {
-      await this.markLogProcessed(log.id, false, 'Hash mismatch');
-      this.logger.warn(`TradeResult callback hash invalid for ${payload.FacTradeSeq}`);
-      return { ok: false, processed: false };
-    }
+    // 注意:hash 是否通過先記在 log,但不在這裡 early-return。
+    // 成功(派發)路徑稍後嚴格要求 hash;失敗類 callback 因已被 IP/UA 白名單守住、
+    // 又不觸發派發,即使 hash 沒過也照樣記錄 MyCard 回傳供顯示/稽核。
 
     // 3. 找訂單
     if (!payload.FacTradeSeq) {
@@ -87,25 +85,75 @@ export class MyCardCallbackService {
       data: { orderId: order.id },
     });
 
-    // 4. 只認 PayResult=3 為成功
+    // 4. 不論成功/失敗,先把 MyCard 這次回傳的原始內容存進 transaction.resultRawBody,
+    //    供後台稽核 + 前端顯示 ReturnCode / ReturnMsg。
+    await this.prisma.transaction
+      .update({
+        where: { orderId: order.id },
+        data: { resultRawBody: payload as unknown as Prisma.InputJsonValue },
+      })
+      .catch((e) =>
+        this.logger.warn(`存 resultRawBody 失敗(不擋流程): ${e instanceof Error ? e.message : e}`),
+      );
+
+    // 5. 只認 PayResult=3 為成功
     if (payload.PayResult !== '3') {
-      // 已是終態就跳過
+      const decodedMsg = this.decodeReturnMsg(payload.ReturnMsg);
+      // 已是終態就不重複轉狀態。但若這次 callback 帶了真正的 ReturnMsg、而原本 failureReason
+      // 還是空的(常見:先被 TradeQuery 探測判 FAILED(ReturnMsg=成功被防呆設 null),
+      // 之後 trade-result callback 才到),就把 failureReason 補回去,讓前端顯示得到 ReturnMsg。
       if (order.status === OrderStatus.FAILED || order.status === OrderStatus.CANCELLED) {
+        if (decodedMsg && !order.failureReason) {
+          await this.prisma.order.update({
+            where: { id: order.id },
+            data: { failureReason: decodedMsg },
+          });
+          this.logger.log(`回填 failureReason for ${order.facTradeSeq}: ${decodedMsg}`);
+        }
         await this.markLogProcessed(log.id, true, null);
         return { ok: true, processed: false };
       }
+      // 已付款 / 已請款 / 已派發的單,不能被一筆「PayResult≠3」打翻(特別是 hash 沒過時)
+      if (
+        order.status === OrderStatus.PAID ||
+        order.status === OrderStatus.CONFIRMED ||
+        order.status === OrderStatus.DELIVERED
+      ) {
+        this.logger.warn(
+          `TradeResult PayResult=${payload.PayResult} 但 ${order.facTradeSeq} 已是 ${order.status} → 忽略,不轉 FAILED`,
+        );
+        await this.markLogProcessed(log.id, true, 'PayResult!=3 but order already paid/delivered — ignored');
+        return { ok: true, processed: false };
+      }
+      if (!hashValid) {
+        this.logger.warn(
+          `TradeResult hash invalid for ${payload.FacTradeSeq}(PayResult≠3)— 仍記錄失敗供顯示(來源已過 IP/UA 白名單)`,
+        );
+      }
+      await this.prisma.transaction
+        .update({ where: { orderId: order.id }, data: { payResult: 0 } })
+        .catch(() => undefined);
       await this.state.transition({
         orderId: order.id,
         toStatus: OrderStatus.FAILED,
         triggeredBy: 'mycard_callback',
-        reason: `PayResult=${payload.PayResult} (${payload.ReturnMsg ?? ''})`,
+        reason: `PayResult=${payload.PayResult} ReturnCode=${payload.ReturnCode ?? ''} (${this.decodeReturnMsg(payload.ReturnMsg) ?? ''})`,
         metadata: payload as unknown as Prisma.InputJsonValue,
+        // MyCard 規定:交易失敗要顯示其回傳的 ReturnMsg(URL-decode 後),存進 failureReason 給前端顯示
+        extraOrderUpdate: { failureReason: this.decodeReturnMsg(payload.ReturnMsg) },
       });
       await this.markLogProcessed(log.id, true, null);
       return { ok: true, processed: true };
     }
 
-    // 5. 防重複儲值 — 用 mycard_trade_no unique
+    // 6. 成功(會觸發派發)路徑 — 嚴格要求 hash 必須正確
+    if (!hashValid) {
+      await this.markLogProcessed(log.id, false, 'Hash mismatch');
+      this.logger.warn(`TradeResult callback hash invalid for ${payload.FacTradeSeq}`);
+      return { ok: false, processed: false };
+    }
+
+    // 7. 防重複儲值 — 用 mycard_trade_no unique
     if (payload.MyCardTradeNo) {
       const existed = await this.prisma.transaction.findUnique({
         where: { mycardTradeNo: payload.MyCardTradeNo },
@@ -313,7 +361,20 @@ export class MyCardCallbackService {
           message: `強制重派完成(status 維持 ${after?.status ?? before.status})`,
         };
       }
-      await this.reprocessOne(facTradeSeq);
+
+      // 已 CONFIRMED / DELIVERY_FAILED → 跳過 reprocessOne(會重打 PaymentConfirm 撞 MBP019)
+      // 直接 tryDispatch 走派發;成功時 state machine 自動 transition → DELIVERED
+      if (
+        before.status === OrderStatus.CONFIRMED ||
+        before.status === OrderStatus.DELIVERY_FAILED
+      ) {
+        this.logger.log(
+          `forceReprocess: ${facTradeSeq} status=${before.status} → 直接 tryDispatch(跳過 TradeQuery + PaymentConfirm)`,
+        );
+        await this.dispatch.tryDispatch(before.id);
+      } else {
+        await this.reprocessOne(facTradeSeq);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { ok: false, status: before.status, message: `reprocessOne threw: ${msg}` };
@@ -364,6 +425,11 @@ export class MyCardCallbackService {
         triggeredBy: 'system',
         reason: `Active probe / supplement: TradeQuery PayResult=0 (${q.data.ReturnMsg ?? ''})`,
         metadata: { my_card_trade_no: q.data.MyCardTradeNo ?? null },
+        // 注意:TradeQuery 的 ReturnCode/ReturnMsg 是「查詢動作」的狀態(1/成功),
+        //       不是付款失敗原因(付款狀態看 PayResult)。所以這條路徑不寫 failureReason,
+        //       留 null 讓前端回退制式文案。真正的拒絕訊息只在 trade-result callback 帶。
+        //       明確設 null:擋掉 state machine 預設把內部 reason 寫進 failureReason。
+        extraOrderUpdate: { failureReason: null },
       });
       return;
     }
@@ -425,19 +491,26 @@ export class MyCardCallbackService {
       ? await this.writeInboundLog(CallbackKind.DIFF_REPORT, meta, query)
       : null;
 
-    // 找成功訂單
+    // 回報「已付款成功(payResult=3)」的所有訂單。
+    // 對智冠對帳而言,只要 MyCard 付款成功就是一筆儲值成功交易;派發(遊戲信件)是我方下游、
+    // 不影響對帳。故不再限 status=DELIVERED,避免「已收款但派發卡住(DELIVERY_FAILED / 尚未
+    // DELIVERED)」的單被漏報,造成智冠有、我方差異網址查無的漏單。
     const where: Prisma.OrderWhereInput = {
-      status: OrderStatus.DELIVERED,
       transaction: { payResult: 3 },
     };
 
     if (query.MyCardTradeNo) {
       where.transaction = { mycardTradeNo: query.MyCardTradeNo };
     } else if (query.StartDateTime && query.EndDateTime) {
-      where.confirmedAt = {
-        gte: new Date(query.StartDateTime),
-        lte: new Date(query.EndDateTime),
-      };
+      const gte = this.parseTwBoundary(query.StartDateTime, 'start');
+      const lte = this.parseTwBoundary(query.EndDateTime, 'end');
+      if (gte && lte) {
+        where.confirmedAt = { gte, lte };
+      } else {
+        this.logger.warn(
+          `DIFF_REPORT 日期無法解析,略過日期過濾:StartDateTime=${query.StartDateTime} EndDateTime=${query.EndDateTime}`,
+        );
+      }
     }
 
     const orders = await this.prisma.order.findMany({
@@ -492,17 +565,24 @@ export class MyCardCallbackService {
       ? await this.writeInboundLog(CallbackKind.TOPUP_RECORDS, meta, query)
       : null;
 
+    // 同 handleDiffReport:回報所有已付款成功(payResult=3)的訂單,不限 status=DELIVERED,
+    // 避免已收款但派發卡住的單被漏報。
     const where: Prisma.OrderWhereInput = {
-      status: OrderStatus.DELIVERED,
+      transaction: { payResult: 3 },
     };
 
     if (query.MyCardID) {
       where.transaction = { mycardTradeNo: query.MyCardID };
     } else if (query.StartDate && query.EndDate) {
-      where.confirmedAt = {
-        gte: new Date(query.StartDate),
-        lte: new Date(`${query.EndDate}T23:59:59`),
-      };
+      const gte = this.parseTwBoundary(query.StartDate, 'start');
+      const lte = this.parseTwBoundary(query.EndDate, 'end');
+      if (gte && lte) {
+        where.confirmedAt = { gte, lte };
+      } else {
+        this.logger.warn(
+          `TOPUP_RECORDS 日期無法解析,略過日期過濾:StartDate=${query.StartDate} EndDate=${query.EndDate}`,
+        );
+      }
     }
 
     const orders = await this.prisma.order.findMany({
@@ -572,6 +652,32 @@ export class MyCardCallbackService {
     );
   }
 
+  /**
+   * MyCard 的 ReturnMsg 文件規定是 URL-encoded(見「交易失敗範例」:
+   * `%e6%b8%ac...` → URL Decode → 「測試金流測試交易失敗的訊息」)。
+   *
+   * 還原成可顯示文字給玩家看:
+   *   - 含 %XX → decodeURIComponent(form parser 沒幫忙時)
+   *   - 已是純文字(parser 已 decode)→ 原樣回
+   *   - 空 / decode 失敗 → 回 null(前端 fallback 顯示制式文案)
+   */
+  private decodeReturnMsg(raw?: string | null): string | null {
+    if (!raw) return null;
+    let s = String(raw).trim();
+    if (!s) return null;
+    if (/%[0-9A-Fa-f]{2}/.test(s)) {
+      try {
+        s = decodeURIComponent(s.replace(/\+/g, ' '));
+      } catch {
+        /* decode 失敗就用原字串 */
+      }
+    }
+    // 防呆:失敗單上永遠不該顯示「成功」字樣(某些 API 的 ReturnMsg 帶的是
+    // 動作狀態而非拒絕原因)→ 視為無意義,回 null 讓前端走制式文案。
+    if (/^(成功|success|ok)$/i.test(s.trim())) return null;
+    return s.trim();
+  }
+
   private async writeInboundLog(
     kind: CallbackKind,
     meta: { sourceIp?: string; userAgent?: string; rawBody?: string; httpMethod?: string; url?: string },
@@ -601,6 +707,36 @@ export class MyCardCallbackService {
       where: { id: logId },
       data: { processed, errorMessage },
     });
+  }
+
+  /**
+   * MyCard 差異比對 / 廠商儲值紀錄查詢傳來的日期,都是「台灣時間 (UTC+8)」的日界。
+   * 但 `confirmed_at` 存的是 UTC,直接 `new Date(raw)`(無時區)在 UTC 容器上會被當成
+   * UTC → 整個對帳窗口平移 8 小時,台灣 00:00–08:00 成交的單被歸到前一天。
+   * 這裡統一補上 `+08:00` 時區,轉成正確的 UTC 瞬間。
+   *
+   * 另外修掉 GET 版原本 `new Date("2026/08/01T23:59:59")` = Invalid Date 的 bug
+   * (MyCard 文件日期格式是斜線),先把 `/` 正規化成 `-`。
+   *
+   * 支援兩種輸入:
+   *   - 日期時間: `2026-08-01T00:00:00` / `2026-08-01 00:00:00`(POST diff-report)
+   *   - 純日期:   `2026/08/01` / `2026-08-01`(GET 廠商查詢)
+   *
+   * @param raw   MyCard 傳來的字串
+   * @param edge  'start' | 'end' — 純日期補整日邊界;end 且無毫秒時補到該秒尾 .999,
+   *              避免 `23:59:59.001~.999` 落在兩個對帳窗的縫隙
+   * @returns 對應 UTC 的 Date;無法解析回 null
+   */
+  private parseTwBoundary(raw: string, edge: 'start' | 'end'): Date | null {
+    if (!raw) return null;
+    let s = raw.trim().replace(/\//g, '-').replace(' ', 'T');
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      s += edge === 'start' ? 'T00:00:00.000' : 'T23:59:59.999';
+    } else if (edge === 'end' && /T\d{2}:\d{2}:\d{2}$/.test(s)) {
+      s += '.999';
+    }
+    const d = new Date(`${s}+08:00`);
+    return isNaN(d.getTime()) ? null : d;
   }
 
   private toUtc8(d: Date | null): string {

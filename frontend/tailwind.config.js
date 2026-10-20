@@ -17,6 +17,17 @@ export default {
           900: '#1e3a8a',
         },
       },
+      keyframes: {
+        // Static backdrop:點背景時 modal 輕微「震一下」回饋,但不關閉
+        'modal-shake': {
+          '0%, 100%': { transform: 'translateX(0)' },
+          '20%, 60%': { transform: 'translateX(-6px)' },
+          '40%, 80%': { transform: 'translateX(6px)' },
+        },
+      },
+      animation: {
+        'modal-shake': 'modal-shake 0.35s ease-in-out',
+      },
     },
   },
   plugins: [],

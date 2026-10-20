@@ -1,8 +1,9 @@
 import { Link, NavLink, Outlet } from 'react-router-dom';
+import { useDocumentTitle } from '@/utils/useDocumentTitle';
 
 /**
  * 玩家前台 layout — 簡化版:
- *   - 左:logo「冰龍遊戲」
+ *   - 左:logo「神代紀事」
  *   - 中:兩個 nav 連結(商品 / 我的訂單),永遠可點
  *   - 右:無(刻意拿掉 UID badge / 更換 / 「尚未登入」狀態 — 不做登入感)
  *
@@ -11,12 +12,17 @@ import { Link, NavLink, Outlet } from 'react-router-dom';
  *   - 我的訂單頁有獨立的 UID 搜尋欄
  */
 export function PlayerLayout() {
+  useDocumentTitle('神代紀事 官方儲值中心');
   return (
     <div className="flex min-h-screen flex-col bg-gradient-to-b from-slate-50 to-white">
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-5xl items-center gap-4 px-3 py-2.5 sm:gap-6 sm:px-6 sm:py-3">
-          <Link to="/" className="text-base font-bold text-brand-600 sm:text-xl">
-            冰龍遊戲
+          <Link to="/" className="flex items-center" aria-label="神代紀事 官方儲值中心">
+            <img
+              src="/brand/shindai-logo.png"
+              alt="神代紀事"
+              className="h-8 w-auto sm:h-10"
+            />
           </Link>
 
           <nav className="flex items-center gap-3 text-sm sm:gap-5">
@@ -32,6 +38,17 @@ export function PlayerLayout() {
             >
               商品
             </NavLink>
+            <NavLink
+              to="/redeem"
+              className={({ isActive }) =>
+                'rounded px-1.5 py-1 transition-colors ' +
+                (isActive
+                  ? 'font-medium text-brand-700'
+                  : 'text-slate-600 hover:text-brand-600')
+              }
+            >
+              序號兌換
+            </NavLink>
             {/* 我的訂單 暫時隱藏 — 等 UID 登入流程穩定後再放回 */}
           </nav>
         </div>
@@ -42,7 +59,7 @@ export function PlayerLayout() {
       </main>
 
       <footer className="border-t border-slate-200 bg-white py-4 text-center text-xs text-slate-500">
-        © 2026 冰龍遊戲. 官方儲值站.
+        © 2026 神代紀事 官方儲值站
       </footer>
     </div>
   );

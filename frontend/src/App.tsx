@@ -8,10 +8,12 @@ import { AdminOrderDetailPage } from './pages/admin/AdminOrderDetailPage';
 import { AdminProductsPage } from './pages/admin/AdminProductsPage';
 import { AdminCategoriesPage } from './pages/admin/AdminCategoriesPage';
 import { AdminUsersPage } from './pages/admin/AdminUsersPage';
+import { AdminMediaPage } from './pages/admin/AdminMediaPage';
 import { PlayerHomePage } from './pages/player/PlayerHomePage';
 import { PlayerOrdersPage } from './pages/player/PlayerOrdersPage';
 import { PlayerOrderDetailPage } from './pages/player/PlayerOrderDetailPage';
 import { RedeemVerifyPage } from './pages/player/RedeemVerifyPage';
+import { RedeemCouponPage } from './pages/player/RedeemCouponPage';
 import { RequireAdmin } from './features/auth/RequireAdmin';
 
 export default function App() {
@@ -23,6 +25,8 @@ export default function App() {
         <Route path="/products" element={<PlayerHomePage />} />
         <Route path="/orders" element={<PlayerOrdersPage />} />
         <Route path="/orders/:facTradeSeq" element={<PlayerOrderDetailPage />} />
+        {/* 序號兌換頁 */}
+        <Route path="/redeem" element={<RedeemCouponPage />} />
         {/* MyCard Model B 直接儲值的玩家驗證頁(MyCard 把玩家瀏覽器導過來)*/}
         <Route path="/redeem-verify" element={<RedeemVerifyPage />} />
       </Route>
@@ -45,6 +49,7 @@ export default function App() {
         <Route path="orders/:id" element={<AdminOrderDetailPage />} />
         <Route path="products" element={<AdminProductsPage />} />
         <Route path="categories" element={<AdminCategoriesPage />} />
+        <Route path="media" element={<AdminMediaPage />} />
         <Route path="users" element={<AdminUsersPage />} />
       </Route>
 

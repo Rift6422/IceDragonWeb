@@ -17,6 +17,8 @@ export interface DispatchInput {
   playfabItemId: string | null;
   /** PlayFab storeID(空 fallback 到 GAME_BACKEND_STORE_ID env)*/
   playfabStoreId: string | null;
+  /** PlayFab CatalogVersion(空 fallback 到 GAME_BACKEND_CATALOG env)*/
+  playfabCatalog: string | null;
   /** 派發 payload(MockMailDispatcher 用;真實 dispatcher 用上面欄位)*/
   payload: {
     subject: string;

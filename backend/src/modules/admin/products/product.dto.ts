@@ -40,7 +40,7 @@ export class CreateProductDto {
 
   @IsOptional()
   @IsString()
-  @MaxLength(1000)
+  @MaxLength(3000)
   description?: string;
 
   @IsNumberString({ no_symbols: false }, { message: 'amount must be numeric' })
@@ -78,6 +78,12 @@ export class CreateProductDto {
   @MaxLength(64)
   playfab_store_id?: string;
 
+  /** PlayFab CatalogVersion(空時 fallback 到 GAME_BACKEND_CATALOG env)*/
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  playfab_catalog?: string;
+
   /** 分類 ID(uuid)— 玩家前台 tab 用 */
   @IsOptional()
   @IsString()
@@ -104,7 +110,7 @@ export class UpdateProductDto {
 
   @IsOptional()
   @IsString()
-  @MaxLength(1000)
+  @MaxLength(3000)
   description?: string;
 
   @IsOptional()
@@ -140,6 +146,11 @@ export class UpdateProductDto {
   @IsString()
   @MaxLength(64)
   playfab_store_id?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  playfab_catalog?: string;
 
   @IsOptional()
   @IsString()

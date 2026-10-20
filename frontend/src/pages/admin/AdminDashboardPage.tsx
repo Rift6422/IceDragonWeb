@@ -96,14 +96,10 @@ export function AdminDashboardPage() {
       {/* 累積 */}
       <section>
         <h2 className="mb-2 text-sm font-medium text-slate-600">累積</h2>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <StatCard label="累積成功訂單" value={fmt(data.totals.delivered_count)} />
           <StatCard label="累積營收(TWD)" value={`NT$ ${fmt(data.totals.delivered_revenue_twd)}`} />
           <StatCard label="玩家總數" value={fmt(data.totals.game_user_count)} />
-          <StatCard
-            label="商品上架中"
-            value={`${data.totals.product_active_count} / ${data.totals.product_total_count}`}
-          />
         </div>
       </section>
 

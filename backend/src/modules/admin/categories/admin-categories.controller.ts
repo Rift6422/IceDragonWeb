@@ -79,21 +79,26 @@ export class AdminCategoriesController {
     return updated;
   }
 
+  /**
+   * 軟刪除分類 — 從列表消失,底下所有商品的 categoryId 設 null(歸到「未分類」)。
+   * 「停用」(可重新啟用)請改用 PATCH /api/admin/categories/:id { status: 'INACTIVE' }
+   */
   @Delete(':id')
-  async deactivate(
+  async softDelete(
     @Param('id', new ParseUUIDPipe()) id: string,
     @CurrentAdmin() admin: { id: string },
     @Req() req: Request,
-  ): Promise<Category> {
-    const deactivated = await this.categories.deactivate(id);
+  ): Promise<{ category: Category; products_unlinked: number }> {
+    const result = await this.categories.softDelete(id);
     await this.audit.log({
       adminId: admin.id,
-      action: 'deactivate_category',
+      action: 'delete_category',
       targetType: 'category',
       targetId: id,
+      payload: { products_unlinked: result.products_unlinked },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent']?.toString(),
     });
-    return deactivated;
+    return result;
   }
 }

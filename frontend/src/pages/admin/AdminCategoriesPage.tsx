@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { extractErrorMessage } from '@/api/client';
+import { StaticBackdrop } from '@/components/StaticBackdrop';
 import {
   createCategory,
   deactivateCategory,
+  deleteCategory,
   fetchCategories,
   updateCategory,
   type AdminCategory,
@@ -41,6 +43,16 @@ export function AdminCategoriesPage() {
   const reactivateMut = useMutation({
     mutationFn: (id: string) => updateCategory(id, { status: 'ACTIVE' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'categories'] }),
+  });
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => deleteCategory(id),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['admin', 'categories'] });
+      qc.invalidateQueries({ queryKey: ['admin', 'products'] });
+      if (res.products_unlinked > 0) {
+        alert(`已刪除分類,${res.products_unlinked} 個商品已歸到「未分類」。`);
+      }
+    },
   });
 
   return (
@@ -92,12 +104,17 @@ export function AdminCategoriesPage() {
                       <button
                         onClick={() => {
                           if (c.product_count > 0) {
-                            if (!confirm(`分類「${c.displayName}」底下還有 ${c.product_count} 個商品,停用後玩家頁不會再顯示這個 tab,確定?`))
+                            if (
+                              !confirm(
+                                `分類「${c.displayName}」底下還有 ${c.product_count} 個商品,停用後玩家頁不會再顯示這個 tab,確定?(可重新啟用)`,
+                              )
+                            )
                               return;
-                          } else if (!confirm(`確定停用「${c.displayName}」?`)) return;
+                          } else if (!confirm(`確定停用「${c.displayName}」?(可重新啟用)`))
+                            return;
                           deactivateMut.mutate(c.id);
                         }}
-                        className="text-red-600 hover:underline"
+                        className="text-amber-600 hover:underline"
                       >
                         停用
                       </button>
@@ -109,6 +126,18 @@ export function AdminCategoriesPage() {
                         重新啟用
                       </button>
                     )}
+                    <button
+                      onClick={() => {
+                        const msg =
+                          c.product_count > 0
+                            ? `⚠ 確定「刪除」分類「${c.displayName}」?\n底下 ${c.product_count} 個商品會被歸到「未分類」。\n刪除後分類從列表消失。`
+                            : `⚠ 確定「刪除」分類「${c.displayName}」?\n刪除後分類從列表消失。`;
+                        if (confirm(msg)) deleteMut.mutate(c.id);
+                      }}
+                      className="text-red-600 hover:underline"
+                    >
+                      刪除
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -199,17 +228,11 @@ function EditorModal({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/60 px-4 py-8"
-      onClick={onCancel}
-    >
-      <div
-        className="w-full max-w-md overflow-hidden rounded-xl bg-white shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <StaticBackdrop boxClassName="w-full max-w-md">
+      <div className="overflow-hidden rounded-xl bg-white shadow-2xl">
         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-3">
           <h2 className="text-lg font-semibold">
-            {mode === 'create' ? '新增分類' : `編輯分類 — ${cat?.code}`}
+            {mode === 'create' ? '新增分類' : `編輯分類 — ${cat?.displayName ?? cat?.code}`}
           </h2>
           <button onClick={onCancel} disabled={submitting} className="text-slate-400 hover:text-slate-600">
             ✕
@@ -218,7 +241,7 @@ function EditorModal({
 
         <form onSubmit={submit} className="space-y-4 px-5 py-4">
           <div>
-            <label className="label mb-1 block text-xs">Code(UPPER_SNAKE_CASE)</label>
+            <label className="label mb-1 block text-xs">Code</label>
             <input
               type="text"
               value={code}
@@ -228,10 +251,9 @@ function EditorModal({
               disabled={mode === 'edit'}
               required
             />
-            <p className="mt-1 text-xs text-slate-400">建後不可改,Player 端用 code 對應 fallback 圖示</p>
           </div>
           <div>
-            <label className="label mb-1 block text-xs">顯示名稱(玩家看到)</label>
+            <label className="label mb-1 block text-xs">顯示名稱</label>
             <input
               type="text"
               value={displayName}
@@ -282,6 +304,6 @@ function EditorModal({
           </div>
         </form>
       </div>
-    </div>
+    </StaticBackdrop>
   );
 }

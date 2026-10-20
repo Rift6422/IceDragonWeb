@@ -77,14 +77,14 @@ export function RedeemVerifyPage() {
               type="text"
               value={uid}
               onChange={(e) => setUid(e.target.value)}
-              placeholder="E9E3E1A9071AF9DC"
+              placeholder="請輸入遊戲 UID"
               maxLength={16}
               className="input font-mono uppercase tracking-wider"
               autoFocus
               autoComplete="off"
             />
             <p className="mt-1 text-xs text-slate-400">
-              16 碼大寫英數,例:<span className="font-mono">E9E3E1A9071AF9DC</span>
+              16 碼大寫英數
             </p>
             {error && <p className="mt-1 text-sm text-rose-600">{error}</p>}
           </div>

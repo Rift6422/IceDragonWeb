@@ -28,8 +28,14 @@ WORKDIR /app/frontend
 # Build-time 環境變數(VITE_* 會 inline 到 bundle,啟動後改不了)
 ARG VITE_API_BASE_URL=""
 ARG VITE_SENTRY_DSN=""
+# FB_PIXEL_ID 是「一個變數雙端共用」設計:
+#   - 後端 runtime 直接讀 process.env.FB_PIXEL_ID(NestJS ConfigService)
+#   - 前端 build time 需要 VITE_ 前綴才會被 Vite inline 進 bundle
+#   - 這裡自動把 FB_PIXEL_ID 映成 VITE_FB_PIXEL_ID,使用者只要設一個變數
+ARG FB_PIXEL_ID=""
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL \
-    VITE_SENTRY_DSN=$VITE_SENTRY_DSN
+    VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
+    VITE_FB_PIXEL_ID=$FB_PIXEL_ID
 
 # 先 copy package files 利用 layer cache
 # --include=dev 雙保險:就算上游 NODE_ENV 又被覆寫,也仍裝 devDeps
@@ -68,7 +74,8 @@ FROM node:20-alpine AS runner
 RUN apk add --no-cache tini openssl
 
 ENV NODE_ENV=production \
-    PORT=3000
+    PORT=3000 \
+    UPLOAD_DIR=/app/uploads
 
 WORKDIR /app
 
@@ -82,6 +89,11 @@ COPY --from=backend-builder --chown=app:app /app/backend/package.json ./package.
 
 # Frontend 產物 → backend 由 ServeStaticModule 接管 /app/public
 COPY --from=frontend-builder --chown=app:app /app/frontend/dist ./public
+
+# 上傳目錄(平台 Volume 掛這裡 → 圖庫資產持久化,容器重建不丟)
+# 沒掛 Volume 也能用,只是重建會丟失 — production 務必掛
+# 不寫 Dockerfile VOLUME 指令:Railway 禁用(build 直接失敗),Volume 一律由平台 UI 掛載
+RUN mkdir -p /app/uploads && chown -R app:app /app/uploads
 
 USER app
 EXPOSE 3000

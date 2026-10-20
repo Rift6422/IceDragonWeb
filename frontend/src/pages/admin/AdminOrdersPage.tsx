@@ -104,21 +104,38 @@ export function AdminOrdersPage() {
             <div className="text-xs text-slate-500">
               {(filter.offset ?? 0) + 1} - {Math.min((filter.offset ?? 0) + (filter.limit ?? 50), data.total)} / {data.total}
             </div>
-            <div className="flex gap-2">
-              <button
-                className="btn-secondary"
-                disabled={(filter.offset ?? 0) === 0}
-                onClick={() => setFilter((f) => ({ ...f, offset: Math.max(0, (f.offset ?? 0) - (f.limit ?? 50)) }))}
-              >
-                上一頁
-              </button>
-              <button
-                className="btn-secondary"
-                disabled={(filter.offset ?? 0) + (filter.limit ?? 50) >= data.total}
-                onClick={() => setFilter((f) => ({ ...f, offset: (f.offset ?? 0) + (f.limit ?? 50) }))}
-              >
-                下一頁
-              </button>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-xs text-slate-600">
+                每頁
+                <select
+                  className="input h-8 w-20 py-0 text-xs"
+                  value={filter.limit ?? 50}
+                  onChange={(e) =>
+                    setFilter((f) => ({ ...f, limit: parseInt(e.target.value, 10), offset: 0 }))
+                  }
+                >
+                  <option value={10}>10</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                筆
+              </label>
+              <div className="flex gap-2">
+                <button
+                  className="btn-secondary"
+                  disabled={(filter.offset ?? 0) === 0}
+                  onClick={() => setFilter((f) => ({ ...f, offset: Math.max(0, (f.offset ?? 0) - (f.limit ?? 50)) }))}
+                >
+                  上一頁
+                </button>
+                <button
+                  className="btn-secondary"
+                  disabled={(filter.offset ?? 0) + (filter.limit ?? 50) >= data.total}
+                  onClick={() => setFilter((f) => ({ ...f, offset: (f.offset ?? 0) + (f.limit ?? 50) }))}
+                >
+                  下一頁
+                </button>
+              </div>
             </div>
           </div>
         </>

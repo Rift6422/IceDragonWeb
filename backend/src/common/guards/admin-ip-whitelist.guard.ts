@@ -7,7 +7,7 @@ import { Request } from 'express';
  *
  * 行為:
  *   - `ADMIN_IP_WHITELIST_ENABLED=false`(預設)→ 直接放行,不擋
- *   - `ADMIN_IP_WHITELIST_ENABLED=true` 但 `ADMIN_IP_WHITELIST` 為空 → 全擋
+ *   - `ADMIN_IP_WHITELIST_ENABLED=true` 但 `ADMIN_IP_WHITELIST_LIST` 為空 → 全擋
  *     (避免「忘了填 IP 就上線」造成自己鎖外)
  *   - `ADMIN_IP_WHITELIST_ENABLED=true` + IP 不在清單 → 403
  *
@@ -33,7 +33,7 @@ export class AdminIpWhitelistGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<Request>();
     const clientIp = req.ip ?? '';
 
-    const raw = this.config.get<string>('ADMIN_IP_WHITELIST') ?? '';
+    const raw = this.config.get<string>('ADMIN_IP_WHITELIST_LIST') ?? '';
     const allowed = raw
       .split(',')
       .map((ip) => ip.trim())
@@ -41,7 +41,7 @@ export class AdminIpWhitelistGuard implements CanActivate {
 
     if (allowed.length === 0) {
       this.logger.error(
-        `IP whitelist enabled but list is empty — blocking all access. Set ADMIN_IP_WHITELIST.`,
+        `IP whitelist enabled but list is empty — blocking all access. Set ADMIN_IP_WHITELIST_LIST.`,
       );
       throw new ForbiddenException('Admin access blocked: IP whitelist misconfigured');
     }

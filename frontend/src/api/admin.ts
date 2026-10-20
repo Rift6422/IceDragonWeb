@@ -175,6 +175,7 @@ export interface AdminProduct {
   sortOrder: number;
   playfabItemId: string | null;
   playfabStoreId: string | null;
+  playfabCatalog: string | null;
   categoryId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -203,6 +204,7 @@ export interface CreateProductInput {
   sort_order?: number;
   playfab_item_id?: string;
   playfab_store_id?: string;
+  playfab_catalog?: string;
   category_id?: string;
 }
 
@@ -219,8 +221,105 @@ export async function updateProduct(
   return data;
 }
 
+/** 下架(可重新上架,仍留在後台列表)— 走 PATCH status:'INACTIVE' */
 export async function deactivateProduct(id: string): Promise<AdminProduct> {
+  return updateProduct(id, { status: 'INACTIVE' });
+}
+
+/** 軟刪除(從後台列表消失,保留歷史訂單 FK)— DELETE endpoint 走真刪除 */
+export async function deleteProduct(id: string): Promise<AdminProduct> {
   const { data } = await api.delete<AdminProduct>(`/api/admin/products/${id}`);
+  return data;
+}
+
+// 商品限購狀態(以指定 UID 視角從遊戲端拉) ----------------------------
+
+export type LimitPeriod = 'DAY' | 'WEEK' | 'MONTH' | 'YEAR' | 'ALL_TIME';
+
+export interface AdminStoreItemEntry {
+  playfab_item_id: string;
+  store_id: string;
+  can_double: boolean;
+  limitation: null | {
+    limit_period: LimitPeriod;
+    max_quantity: number;
+    left_quantity: number;
+    reset_at: string | null;
+  };
+}
+
+export interface AdminStoreItemsResponse {
+  uid: string;
+  fetched_at: string;
+  store_ids: string[];
+  stub_or_failed: boolean;
+  items: Record<string, AdminStoreItemEntry>;
+  /** 玩家已擁有的 premium itemId 清單(月卡類)*/
+  own_premiums: string[];
+}
+
+export async function fetchAdminStoreItems(uid: string): Promise<AdminStoreItemsResponse> {
+  const { data } = await api.get<AdminStoreItemsResponse>('/api/admin/products/store-items', {
+    params: { uid },
+  });
+  return data;
+}
+
+// 圖庫(Media)----------------------------
+
+export interface MediaItem {
+  id: string;
+  url: string;
+  filename: string;
+  original_name: string | null;
+  mime_type: string;
+  size_bytes: number;
+  uploaded_at: string;
+  /** 軟刪時間;null = 仍啟用 */
+  deleted_at: string | null;
+}
+
+export interface MediaListResponse {
+  total: number;
+  items: MediaItem[];
+  /** 軟刪除總數,獨立於 total */
+  deleted_count: number;
+}
+
+/** 5MB,跟後端 MAX_BYTES 一致 — client-side 預檢避免浪費上傳時間 */
+export const MEDIA_MAX_BYTES = 5 * 1024 * 1024;
+export const MEDIA_ALLOWED_MIMES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+] as const;
+
+export async function fetchMediaList(
+  opts: { includeDeleted?: boolean } = {},
+): Promise<MediaListResponse> {
+  const { data } = await api.get<MediaListResponse>('/api/admin/media', {
+    params: { limit: 200, include_deleted: opts.includeDeleted ? 'true' : undefined },
+  });
+  return data;
+}
+
+export async function uploadMedia(file: File): Promise<MediaItem> {
+  const form = new FormData();
+  form.append('file', file);
+  const { data } = await api.post<MediaItem>('/api/admin/media/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return data;
+}
+
+export async function deleteMedia(id: string): Promise<{ id: string; deleted: boolean }> {
+  const { data } = await api.delete<{ id: string; deleted: boolean }>(`/api/admin/media/${id}`);
+  return data;
+}
+
+export async function restoreMedia(id: string): Promise<MediaItem> {
+  const { data } = await api.patch<MediaItem>(`/api/admin/media/${id}/restore`);
   return data;
 }
 
@@ -269,8 +368,18 @@ export async function updateCategory(
   return data;
 }
 
+/** 停用(可重新啟用,仍留在後台列表)— 走 PATCH status:'INACTIVE' */
 export async function deactivateCategory(id: string): Promise<AdminCategory> {
-  const { data } = await api.delete<AdminCategory>(`/api/admin/categories/${id}`);
+  return updateCategory(id, { status: 'INACTIVE' });
+}
+
+/** 軟刪除分類 — 底下商品 categoryId 一起設 null(歸到「未分類」)*/
+export async function deleteCategory(
+  id: string,
+): Promise<{ category: AdminCategory; products_unlinked: number }> {
+  const { data } = await api.delete<{ category: AdminCategory; products_unlinked: number }>(
+    `/api/admin/categories/${id}`,
+  );
   return data;
 }
 
@@ -286,6 +395,10 @@ export interface AdminUserListItem {
   created_at: string;
   last_login_at: string | null;
   is_active: boolean;
+  /** 累積成立訂單數(只算 DELIVERED) */
+  delivered_order_count: number;
+  /** 累積消費金額 TWD(只算 DELIVERED 訂單) */
+  total_spent_twd: string;
 }
 
 export interface AdminUsersResponse {
@@ -300,5 +413,27 @@ export async function fetchUsers(params: {
   offset?: number;
 } = {}): Promise<AdminUsersResponse> {
   const { data } = await api.get<AdminUsersResponse>('/api/admin/users', { params });
+  return data;
+}
+
+export interface AdminUserOrder {
+  id: string;
+  fac_trade_seq: string;
+  status: string;
+  amount: string;
+  currency: string;
+  created_at: string;
+  delivered_at: string | null;
+  product_code: string;
+  product_name: string;
+}
+
+export interface AdminUserDetail extends AdminUserListItem {
+  orders: AdminUserOrder[];
+  inventory_currencies: Array<{ currency_code: string; balance: string }>;
+}
+
+export async function fetchUserDetail(id: string): Promise<AdminUserDetail> {
+  const { data } = await api.get<AdminUserDetail>(`/api/admin/users/${id}`);
   return data;
 }

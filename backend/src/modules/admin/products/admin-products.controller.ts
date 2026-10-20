@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -15,7 +16,7 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 import { Product } from '@prisma/client';
-import { AdminProductsService } from './admin-products.service';
+import { AdminProductsService, AdminStoreItemsResponse } from './admin-products.service';
 import { CreateProductDto, ListProductsDto, UpdateProductDto } from './product.dto';
 import { AdminJwtGuard } from '../../../common/guards/admin-jwt.guard';
 import { AdminIpWhitelistGuard } from '../../../common/guards/admin-ip-whitelist.guard';
@@ -33,6 +34,18 @@ export class AdminProductsController {
   @Get()
   list(@Query() query: ListProductsDto): Promise<{ total: number; items: Product[] }> {
     return this.products.list(query);
+  }
+
+  /**
+   * 以指定 UID 視角拉所有商品的限購資訊(debug / 客服查詢)。
+   * 注意:必須放在 `:id` route 之前,否則會被 ParseUUIDPipe 攔截。
+   */
+  @Get('store-items')
+  storeItems(@Query('uid') uid?: string): Promise<AdminStoreItemsResponse> {
+    if (!uid || !/^[0-9A-Fa-f]{16}$/.test(uid)) {
+      throw new BadRequestException('uid 必填,且為 16 碼 hex');
+    }
+    return this.products.getStoreItemsForUid(uid);
   }
 
   @Get(':id')
@@ -80,21 +93,25 @@ export class AdminProductsController {
     return updated;
   }
 
+  /**
+   * 軟刪除商品 — 設 deletedAt,從後台列表 + 玩家前台都消失。
+   * 「下架」(可重新上架)請改用 PATCH /api/admin/products/:id { status: 'INACTIVE' }
+   */
   @Delete(':id')
-  async deactivate(
+  async softDelete(
     @Param('id', new ParseUUIDPipe()) id: string,
     @CurrentAdmin() admin: { id: string },
     @Req() req: Request,
   ): Promise<Product> {
-    const deactivated = await this.products.deactivate(id);
+    const deleted = await this.products.softDelete(id);
     await this.audit.log({
       adminId: admin.id,
-      action: 'deactivate_product',
+      action: 'delete_product',
       targetType: 'product',
       targetId: id,
       ipAddress: req.ip,
       userAgent: req.headers['user-agent']?.toString(),
     });
-    return deactivated;
+    return deleted;
   }
 }

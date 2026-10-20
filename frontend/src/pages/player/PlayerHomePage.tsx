@@ -6,14 +6,16 @@ import {
   createPlayerOrder,
   fetchMyOrderDetail,
   fetchPlayerProducts,
+  releaseAbandonedOrder,
   verifyPlayerUid,
   type OrderStatus,
   type PlayerOrderDetail,
-  type ProductEffect,
   type PublicCategory,
   type PublicProduct,
 } from '@/api/player';
 import { isValidUid, normalizeUid, usePlayerStore } from '@/features/player/uid.store';
+import { initFbPixel, readFbc, readFbp, trackFbPurchase } from '@/lib/fb-pixel';
+import { notifyUnityPaymentResult } from '@/lib/unity-bridge';
 
 /**
  * 玩家儲值兩段式流程:
@@ -26,19 +28,8 @@ import { isValidUid, normalizeUid, usePlayerStore } from '@/features/player/uid.
 /** 沒分類(舊資料 / 後台未指定)時的 fallback */
 const UNCATEGORIZED_KEY = '__uncategorized__';
 const UNCATEGORIZED_LABEL = '其他';
-
-const EFFECT_FALLBACK_NAMES: Record<string, string> = {
-  DIAMOND: '啟源石',
-  STONE: '啟源石',
-  CRYSTAL: '源結晶',
-};
-
-function effectLabel(e: ProductEffect): string {
-  return e.display_label ?? EFFECT_FALLBACK_NAMES[e.code] ?? e.code;
-}
-function effectAmount(e: ProductEffect): number {
-  return e.amount ?? e.qty ?? 0;
-}
+/** localStorage key:導去 MyCard 前記下 FacTradeSeq,跳回來時釋放未完成單的鎖 */
+const PENDING_PAYMENT_FTS_KEY = 'pendingPaymentFts';
 
 const DEFAULT_BUNDLE_ICON = '/icons/bundle-default.jpg';
 const DEFAULT_CURRENCY_ICON = '/icons/stone-default.jpg';
@@ -114,6 +105,11 @@ export function PlayerHomePage() {
 
   const loggedIn = !!storedUid && isValidUid(storedUid);
 
+  // Pixel init / PageView — UID 一拿到就送(同 UID 重 render 是 no-op)
+  useEffect(() => {
+    if (loggedIn && storedUid) initFbPixel(storedUid);
+  }, [loggedIn, storedUid]);
+
   if (!loggedIn) {
     return <LoginScreen onLogin={(uid) => setIdentity(uid)} />;
   }
@@ -173,24 +169,21 @@ function LoginScreen({ onLogin }: { onLogin: (uid: string) => void }) {
     <div className="mx-auto flex min-h-[85vh] max-w-md flex-col items-center justify-center px-4 py-6">
       <div className="mb-6 flex items-center gap-3 text-center">
         <img
-          src="/icons/icedragon-shop.webp"
-          alt="冰龍遊戲"
+          src="/brand/shindai-icon.png"
+          alt="神代紀事"
           className="h-16 w-16 flex-shrink-0 rounded-lg"
           style={{ imageRendering: 'pixelated' }}
         />
         <h1 className="text-xl font-bold leading-tight text-slate-900 sm:text-2xl">
-          冰龍遊戲<br className="sm:hidden" />
+          神代紀事<br className="sm:hidden" />
           <span className="block sm:inline sm:ml-1">官方儲值中心</span>
         </h1>
       </div>
 
       <div className="w-full rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
-        <h2 className="mb-1 text-base font-semibold text-slate-900">
+        <h2 className="mb-4 text-base font-semibold text-slate-900">
           請輸入遊戲 UID
         </h2>
-        <p className="mb-4 text-xs text-slate-500">
-          UID 可在遊戲設定畫面複製,輸入後將以此帳號驗證並顯示對應的禮包剩餘購買次數
-        </p>
 
         <input
           type="text"
@@ -202,7 +195,7 @@ function LoginScreen({ onLogin }: { onLogin: (uid: string) => void }) {
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !submitting) submit();
           }}
-          placeholder="E9E3E1A9071AF9DC"
+          placeholder="請輸入遊戲 UID"
           maxLength={16}
           inputMode="text"
           autoCapitalize="characters"
@@ -331,7 +324,14 @@ function ProductsScreen({
   useEffect(() => {
     if (deepLinkOpenedRef.current) return;
     if (!deepLinkItem || !data?.items) return;
-    const found = data.items.find((p) => p.code === deepLinkItem);
+    // 比對商品 code 或遊戲端 PlayFab itemId。
+    // 限購禮包的 code 是後台手打的(如 BUNDLE_DAILY),跟遊戲 itemId 不一定相同,
+    // 只比 code 會導致帶 itemId 的連結找不到商品 → 停在列表。兩者都比才穩。
+    const found = data.items.find(
+      (p) =>
+        p.code === deepLinkItem ||
+        (p.playfab_item_id ?? '').toUpperCase() === deepLinkItem,
+    );
     if (found) {
       setTab(found.category?.id ?? UNCATEGORIZED_KEY);
       setSelected(found);
@@ -345,12 +345,42 @@ function ProductsScreen({
 
   const purchase = useMutation({
     mutationFn: (productCode: string) =>
-      createPlayerOrder({ uid, productCode, email: email ?? undefined }),
+      createPlayerOrder({
+        uid,
+        productCode,
+        email: email ?? undefined,
+        fbp: readFbp() ?? undefined,
+        fbc: readFbc() ?? undefined,
+      }),
     onSuccess: (res) => {
       setRedirecting(true);
+      // 記下這筆,等玩家若沒付就跳回來時(見下方 useEffect)主動釋放鎖
+      try {
+        localStorage.setItem(PENDING_PAYMENT_FTS_KEY, res.fac_trade_seq);
+      } catch {
+        /* ignore */
+      }
       window.location.href = res.redirect_url;
     },
   });
+
+  // D:玩家從 MyCard 付款頁跳回商城(按上一頁 / 關閉)→ 主動釋放上一筆未完成單的鎖。
+  //   後端已用 TradeQuery 把關:真的付了的單不會被取消,所以這裡無腦打即可。
+  //   手機強關收不到 → 不可靠,僅作輔助;主力靠建單時的「解自己的鎖」。
+  useEffect(() => {
+    let fts: string | null = null;
+    try {
+      fts = localStorage.getItem(PENDING_PAYMENT_FTS_KEY);
+      if (fts) localStorage.removeItem(PENDING_PAYMENT_FTS_KEY);
+    } catch {
+      /* ignore */
+    }
+    if (fts) {
+      releaseAbandonedOrder(fts).catch(() => {
+        /* best-effort,失敗交給建單時的解鎖兜底 */
+      });
+    }
+  }, []);
 
   const showPurchaseOverlay = purchase.isPending || redirecting;
 
@@ -361,14 +391,14 @@ function ProductsScreen({
         <div className="flex items-center justify-between gap-3 sm:gap-4">
           <div className="flex min-w-0 items-center gap-3 sm:gap-4">
             <img
-              src="/icons/icedragon-shop.webp"
-              alt="冰龍遊戲"
+              src="/brand/shindai-icon.png"
+              alt="神代紀事"
               className="h-12 w-12 flex-shrink-0 rounded-lg bg-white/10 p-1 sm:h-16 sm:w-16"
               style={{ imageRendering: 'pixelated' }}
             />
             <div className="min-w-0">
               <h1 className="truncate text-base font-bold leading-tight sm:text-2xl md:text-3xl">
-                冰龍遊戲 官方儲值中心
+                神代紀事 官方儲值中心
               </h1>
               <p className="mt-0.5 truncate text-xs text-white/80 sm:text-sm">
                 <span className="opacity-70">UID:</span>{' '}
@@ -437,7 +467,6 @@ function ProductsScreen({
         <ProductDetailModal
           product={selected}
           purchasing={purchase.isPending}
-          purchaseError={purchase.error ? extractErrorMessage(purchase.error) : null}
           onPurchase={() => purchase.mutate(selected.code)}
           onClose={() => {
             if (!purchase.isPending && !redirecting) {
@@ -445,6 +474,15 @@ function ProductsScreen({
               purchase.reset();
             }
           }}
+        />
+      )}
+
+      {/* 建單被中止(遊戲端鎖定 / 已下架 / 系統異常)→ 跳出提醒。
+          此時後端尚未建 MyCard 訂單、也不會跳轉,玩家點「我知道了」關掉即可。 */}
+      {purchase.error && (
+        <BuildBlockedDialog
+          message={extractErrorMessage(purchase.error)}
+          onClose={() => purchase.reset()}
         />
       )}
 
@@ -516,7 +554,49 @@ function PaymentResultModal({
     retry: 1,
   });
 
-  const view = hintedView ?? renderPaymentView(order, elapsedSec);
+  let view = hintedView ?? renderPaymentView(order, elapsedSec);
+  // MyCard 規定:交易失敗要顯示其回傳的 ReturnCode / ReturnMsg,讓玩家了解失敗原因。
+  // 任一有值就蓋掉制式副標,改顯示 MyCard 實際回傳;客服提示移到下方小字(見 render)。
+  const returnCode = order?.return_code ?? null;
+  const returnMsg = order?.return_msg ?? order?.failure_reason ?? null;
+  const showFailReason =
+    view.isTerminal && order?.status === 'FAILED' && (!!returnCode || !!returnMsg);
+  if (showFailReason) {
+    // 格式:[ReturnCode]ReturnMsg(無 code 只顯示 msg,無 msg 只顯示 [code])
+    const subtitle = `${returnCode ? `[${returnCode}]` : ''}${returnMsg ?? ''}`.trim();
+    view = { ...view, subtitle };
+  }
+
+  // 通知 Unity WebView — 到終態時送 { success, itemId } 回遊戲端(只送一次)。
+  // itemId = 遊戲端 itemId(game_item_id),要等訂單載入後才送(沒 itemId 對遊戲端沒意義)。
+  // 未設 PlayFab 的商品 game_item_id 為 null → fallback 用 product_code。
+  // 非 WebView 環境(window.Unity 不存在)會自動 no-op。
+  const unityFiredRef = useRef(false);
+  useEffect(() => {
+    if (unityFiredRef.current) return;
+    if (!view.isTerminal) return;
+    if (!order) return; // 等 itemId 到手再送
+    notifyUnityPaymentResult({
+      success: isPaymentSuccess(resultHint, order.status),
+      itemId: order.game_item_id || order.product_code,
+      status: order.status,
+      facTradeSeq,
+    });
+    unityFiredRef.current = true;
+  }, [view.isTerminal, resultHint, order, facTradeSeq]);
+
+  // 派發成功才觸 FB Pixel Purchase(DELIVERED / hint=success)
+  // 每筆 facTradeSeq 只送一次,backend CAPI 也會送同一個 event_id,FB 自動去重
+  const firedRef = useRef(false);
+  useEffect(() => {
+    if (firedRef.current) return;
+    const success =
+      resultHint === 'success' || order?.status === 'DELIVERED';
+    if (!success) return;
+    if (!order) return; // 還沒拿到金額,等下次 render
+    trackFbPurchase(facTradeSeq, Number(order.amount), order.currency || 'TWD');
+    firedRef.current = true;
+  }, [resultHint, order, facTradeSeq]);
 
   return (
     <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/70 px-4 backdrop-blur-sm">
@@ -529,6 +609,11 @@ function PaymentResultModal({
             </h2>
             {view.subtitle && (
               <p className={'mt-1 text-sm ' + view.subtitleClass}>{view.subtitle}</p>
+            )}
+            {showFailReason && (
+              <p className="mt-1.5 text-xs text-rose-500/80">
+                若您已扣款請聯繫客服協助處理
+              </p>
             )}
           </div>
         </div>
@@ -570,6 +655,22 @@ function isTerminalStatus(s: OrderStatus): boolean {
 }
 
 /**
+ * 回給 Unity 的 success 判定 = 「款項是否已收」。
+ *   付款成功(含 DELIVERY_FAILED:錢收了,商品改人工補發)→ true
+ *   FAILED / CANCELLED → false
+ */
+function isPaymentSuccess(hint: string, status?: OrderStatus): boolean {
+  if (hint === 'success' || hint === 'delivery_failed') return true;
+  if (hint === 'fail' || hint === 'cancelled') return false;
+  return (
+    status === 'DELIVERED' ||
+    status === 'PAID' ||
+    status === 'CONFIRMED' ||
+    status === 'DELIVERY_FAILED'
+  );
+}
+
+/**
  * Backend wait-and-join 提早確認的終態 → 直接做出對應 view,不必等 poll
  * (拿不到 hint 或 hint 無法識別 → 回 null,fallback 走 renderPaymentView)
  */
@@ -581,7 +682,7 @@ function resultHintToView(hint: string): PaymentView | null {
         iconClass: 'text-emerald-500',
         title: '付款成功,商品已派發',
         titleClass: 'text-emerald-900',
-        subtitle: '已寄入您的遊戲信箱,登入遊戲即可領取',
+        subtitle: '商品已直接存入您的倉庫',
         subtitleClass: 'text-emerald-700',
         bgClass: 'bg-emerald-50',
         isTerminal: true,
@@ -658,7 +759,7 @@ function renderPaymentView(order: PlayerOrderDetail | undefined, elapsedSec: num
       iconClass: 'text-emerald-500',
       title: '付款成功,商品已派發',
       titleClass: 'text-emerald-900',
-      subtitle: '已寄入您的遊戲信箱,登入遊戲即可領取',
+      subtitle: '商品已直接存入您的倉庫',
       subtitleClass: 'text-emerald-700',
       bgClass: 'bg-emerald-50',
       isTerminal: true,
@@ -788,34 +889,49 @@ function PurchaseLoadingOverlay() {
 function ProductCard({ product, onClick }: { product: PublicProduct; onClick: () => void }) {
   const icon = productIcon(product);
   const limit = product.limitation;
+  const owned = product.owned === true;
   const soldOut = !!limit && limit.left_quantity <= 0;
+  // 已擁有優先於售完(都是不能買,但「已擁有」的圖示蓋章顏色不同 + 文案不同)
+  const disabled = owned || soldOut;
   const limitBadge = formatLimitBadge(product);
+  const showFirstDouble = !owned && isFirstPurchaseDouble(product);
 
   return (
     <button
       onClick={onClick}
-      disabled={soldOut}
+      disabled={disabled}
       className={
-        'group flex min-h-[180px] flex-col rounded-lg border bg-white p-2.5 text-left shadow-sm transition-all sm:min-h-[200px] sm:p-3 ' +
-        (soldOut
+        'group relative flex min-h-[180px] flex-col rounded-lg border bg-white p-2.5 text-left shadow-sm transition-all sm:min-h-[200px] sm:p-3 ' +
+        (disabled
           ? 'cursor-not-allowed border-slate-200 opacity-60'
           : 'border-slate-200 hover:-translate-y-0.5 hover:border-brand-400 hover:shadow-md active:scale-[0.98]')
       }
     >
+      {showFirstDouble && (
+        <span className="absolute -right-1 -top-1 rounded-full bg-gradient-to-r from-rose-500 to-amber-500 px-2 py-0.5 text-[10px] font-bold text-white shadow-md sm:text-xs">
+          首儲雙倍
+        </span>
+      )}
       <div className="mb-1 line-clamp-1 text-xs font-semibold text-slate-800 sm:text-sm">
         {product.name_display}
       </div>
       <div className="relative flex flex-1 items-center justify-center py-2 sm:py-3">
         <IconView icon={icon} alt={product.name_display} size="card" />
-        {soldOut && (
+        {owned ? (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="rounded-full bg-emerald-600/85 px-3 py-1 text-xs font-bold text-white">
+              已擁有
+            </span>
+          </div>
+        ) : soldOut ? (
           <div className="absolute inset-0 flex items-center justify-center">
             <span className="rounded-full bg-slate-900/80 px-3 py-1 text-xs font-bold text-white">
               已售完
             </span>
           </div>
-        )}
+        ) : null}
       </div>
-      {limitBadge && (
+      {limitBadge && !owned && (
         <div
           className={
             'mb-1 self-start rounded px-1.5 py-0.5 text-[10px] font-medium sm:px-2 sm:text-xs ' +
@@ -830,6 +946,17 @@ function ProductCard({ product, onClick }: { product: PublicProduct; onClick: ()
       </div>
     </button>
   );
+}
+
+/**
+ * 首儲加倍是否要顯示在卡片角落
+ *
+ * 規則:
+ *   - 只看 can_double(該品項是否參與加倍)— 跟遊戲端討論後簡化
+ *   - null(舊 endpoint fallback / API 失敗)→ 不顯示
+ */
+function isFirstPurchaseDouble(p: PublicProduct): boolean {
+  return p.can_double === true;
 }
 
 // ============================================================
@@ -867,25 +994,82 @@ function periodPrefix(p: NonNullable<PublicProduct['limitation']>['limit_period'
 }
 
 // ============================================================
+// BuildBlockedDialog — 建單被中止的提醒彈窗
+// ============================================================
+
+/**
+ * 建單在「打 MyCard 之前」就被中止時跳出的提醒。
+ * 觸發來源:遊戲端鎖定(其他端口購買中 / 自己已付)、商品下架、遊戲端系統異常。
+ * 此時後端尚未建立 MyCard 訂單、也不會跳轉付款頁,純提醒玩家。
+ */
+function BuildBlockedDialog({
+  message,
+  onClose,
+}: {
+  message: string;
+  onClose: () => void;
+}) {
+  // 依訊息內容判斷是不是「鎖定」類(換個圖示與標題,其餘走通用提醒)
+  const isLock = /鎖定|其他端口|處理中|已付款/.test(message);
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-end justify-center bg-slate-900/60 sm:items-center sm:px-4"
+      onClick={onClose}
+      role="alertdialog"
+      aria-modal="true"
+    >
+      <div
+        className="relative w-full max-w-sm overflow-hidden rounded-t-2xl bg-white shadow-2xl sm:rounded-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex flex-col items-center px-6 pt-7 text-center">
+          <div
+            className={
+              'flex h-14 w-14 items-center justify-center rounded-full text-3xl ' +
+              (isLock ? 'bg-amber-100' : 'bg-rose-100')
+            }
+          >
+            {isLock ? '🔒' : '⚠️'}
+          </div>
+          <h3 className="mt-4 text-lg font-bold text-slate-900">
+            {isLock ? '暫時無法購買' : '無法建立訂單'}
+          </h3>
+          <p className="mt-2 text-sm leading-relaxed text-slate-600">{message}</p>
+        </div>
+        <div className="px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-6">
+          <button
+            onClick={onClose}
+            className="btn-primary w-full py-3 text-base"
+            autoFocus
+          >
+            我知道了
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // ProductDetailModal
 // ============================================================
 
 function ProductDetailModal({
   product,
   purchasing,
-  purchaseError,
   onPurchase,
   onClose,
 }: {
   product: PublicProduct;
   purchasing: boolean;
-  purchaseError: string | null;
   onPurchase: () => void;
   onClose: () => void;
 }) {
-  const effects = product.effects.effects ?? [];
+  const description = product.description?.trim() ?? '';
   const icon = productIcon(product);
+  const owned = product.owned === true;
   const soldOut = !!product.limitation && product.limitation.left_quantity <= 0;
+  const disabled = owned || soldOut;
 
   return (
     <div
@@ -910,22 +1094,35 @@ function ProductDetailModal({
           <h2 className="text-base font-bold text-slate-900 sm:text-lg">
             {product.name_display}
           </h2>
-          {(() => {
-            const badge = formatLimitBadge(product);
-            if (!badge) return null;
-            return (
-              <div
-                className={
-                  'mt-1 inline-block rounded px-2 py-0.5 text-xs font-medium ' +
-                  (soldOut
-                    ? 'bg-slate-200 text-slate-500'
-                    : 'bg-amber-100 text-amber-700')
-                }
-              >
-                {badge}
-              </div>
-            );
-          })()}
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            {owned && (
+              <span className="rounded bg-emerald-600 px-2 py-0.5 text-xs font-bold text-white shadow-sm">
+                已擁有
+              </span>
+            )}
+            {!owned && isFirstPurchaseDouble(product) && (
+              <span className="rounded bg-gradient-to-r from-rose-500 to-amber-500 px-2 py-0.5 text-xs font-bold text-white shadow-sm">
+                首儲雙倍
+              </span>
+            )}
+            {!owned &&
+              (() => {
+                const badge = formatLimitBadge(product);
+                if (!badge) return null;
+                return (
+                  <span
+                    className={
+                      'rounded px-2 py-0.5 text-xs font-medium ' +
+                      (soldOut
+                        ? 'bg-slate-200 text-slate-500'
+                        : 'bg-amber-100 text-amber-700')
+                    }
+                  >
+                    {badge}
+                  </span>
+                );
+              })()}
+          </div>
         </div>
 
         <div className="space-y-3 px-4 py-4 sm:space-y-4 sm:px-5 sm:py-5">
@@ -933,38 +1130,26 @@ function ProductDetailModal({
             <IconView icon={icon} alt={product.name_display} size="modal" />
           </div>
 
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
-            <div className="mb-2 font-semibold text-slate-700">包含:</div>
-            {effects.length > 0 ? (
-              <ul className="space-y-1 text-slate-700">
-                {effects.map((e, i) => (
-                  <li key={i} className="flex items-baseline justify-between">
-                    <span>「{effectLabel(e)}」</span>
-                    <span className="font-mono font-semibold">
-                      × {effectAmount(e).toLocaleString()}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="text-slate-400">(此商品沒有 effects 資料)</p>
-            )}
-          </div>
-
-          {purchaseError && (
-            <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-              建單失敗:{purchaseError}
+          {description && (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+              <div className="mb-2 font-semibold text-slate-700">商品說明:</div>
+              <p className="whitespace-pre-line leading-relaxed text-slate-700">
+                {description}
+              </p>
             </div>
           )}
+
         </div>
 
         <div className="sticky bottom-0 border-t border-slate-200 bg-slate-50 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-5 sm:py-4">
           <button
             onClick={onPurchase}
-            disabled={purchasing || soldOut}
+            disabled={purchasing || disabled}
             className="btn-primary w-full py-3 text-base sm:py-2.5"
           >
-            {soldOut
+            {owned
+              ? '您已擁有此商品'
+              : soldOut
               ? '已達購買上限'
               : purchasing
               ? '處理中…'

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -12,8 +13,10 @@ import { OrdersModule } from './modules/orders/orders.module';
 import { DispatchModule } from './modules/dispatch/dispatch.module';
 import { CallbackModule } from './modules/callback/callback.module';
 import { ProductsModule } from './modules/products/products.module';
+import { CouponsModule } from './modules/coupons/coupons.module';
 import { MyCardDirectModule } from './modules/mycard-direct/mycard-direct.module';
 import { GameBackendModule } from './modules/game-backend/game-backend.module';
+import { FbCapiModule } from './modules/fb-capi/fb-capi.module';
 
 // 解析靜態檔目錄:
 //   - prod (Docker):/app/public(Dockerfile COPY vite dist 進來)
@@ -34,6 +37,7 @@ function resolveStaticRoot(): string | null {
 }
 
 const STATIC_ROOT = resolveStaticRoot();
+const UPLOAD_DIR = process.env.UPLOAD_DIR || '/app/uploads';
 
 @Module({
   imports: [
@@ -43,11 +47,23 @@ const STATIC_ROOT = resolveStaticRoot();
       validate: validateEnv,
       cache: true,
     }),
+    // 排程引擎(訂單對帳 sweep 用,見 CallbackModule → OrderReconciliationService)
+    ScheduleModule.forRoot(),
+    // 圖庫 — 從 Volume 服務(順序在 SPA 前面,因為有 serveRoot 不會干擾 SPA fallthrough)
+    ServeStaticModule.forRoot({
+      rootPath: UPLOAD_DIR,
+      serveRoot: '/uploads',
+      serveStaticOptions: {
+        index: false,
+        fallthrough: false,
+        maxAge: '7d',
+      },
+    }),
     ...(STATIC_ROOT
       ? [
           ServeStaticModule.forRoot({
             rootPath: STATIC_ROOT,
-            exclude: ['/api/(.*)', '/healthz', '/healthz/(.*)'],
+            exclude: ['/api/(.*)', '/healthz', '/healthz/(.*)', '/uploads/(.*)'],
             serveStaticOptions: {
               index: ['index.html'],
               fallthrough: true,
@@ -58,12 +74,14 @@ const STATIC_ROOT = resolveStaticRoot();
     PrismaModule,
     HealthModule,
     GameBackendModule,
+    FbCapiModule,
     MyCardModule,
     OrdersModule,
     DispatchModule,
     CallbackModule,
     AdminModule,
     ProductsModule,
+    CouponsModule,
     MyCardDirectModule,
   ],
 })

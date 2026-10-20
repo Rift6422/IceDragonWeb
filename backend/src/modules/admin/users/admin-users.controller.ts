@@ -1,5 +1,5 @@
 import { Controller, Get, Param, ParseUUIDPipe, Query, UseGuards } from '@nestjs/common';
-import { AdminUsersService } from './admin-users.service';
+import { AdminUsersService, UserDetailResponse } from './admin-users.service';
 import { ListUsersDto } from './list-users.dto';
 import { AdminJwtGuard } from '../../../common/guards/admin-jwt.guard';
 import { AdminIpWhitelistGuard } from '../../../common/guards/admin-ip-whitelist.guard';
@@ -8,9 +8,9 @@ import { AdminIpWhitelistGuard } from '../../../common/guards/admin-ip-whitelist
  * GameUser 後台 — 嚴格 read-only(決議 #A5)
  *
  * GET 路徑:
- *   /api/admin/users           list with filters
- *   /api/admin/users/:id       by user.id (uuid)
- *   /api/admin/users/uid/:uid  by uid (16-char hex)
+ *   /api/admin/users           list with filters(含每位玩家累積消費 + 訂單數)
+ *   /api/admin/users/:id       by user.id (uuid),含訂單清單
+ *   /api/admin/users/uid/:uid  by uid (16-char hex),含訂單清單
  *
  * 沒有任何 POST / PATCH / DELETE — GameUser 由遊戲端建立,本系統不寫
  */
@@ -25,12 +25,12 @@ export class AdminUsersController {
   }
 
   @Get('uid/:uid')
-  byUid(@Param('uid') uid: string): Promise<unknown> {
+  byUid(@Param('uid') uid: string): Promise<UserDetailResponse> {
     return this.users.detailByUid(uid);
   }
 
   @Get(':id')
-  detail(@Param('id', new ParseUUIDPipe()) id: string): Promise<unknown> {
+  detail(@Param('id', new ParseUUIDPipe()) id: string): Promise<UserDetailResponse> {
     return this.users.detail(id);
   }
 }

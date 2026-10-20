@@ -4,6 +4,7 @@ import { useForm } from 'react-hook-form';
 import { adminLogin } from '@/api/admin';
 import { useAuthStore } from '@/features/auth/auth.store';
 import { extractErrorMessage } from '@/api/client';
+import { useDocumentTitle } from '@/utils/useDocumentTitle';
 
 interface LoginForm {
   username: string;
@@ -11,6 +12,7 @@ interface LoginForm {
 }
 
 export function AdminLoginPage() {
+  useDocumentTitle('冰龍遊戲 後台');
   const navigate = useNavigate();
   const location = useLocation();
   const setAuth = useAuthStore((s) => s.setAuth);
@@ -18,7 +20,7 @@ export function AdminLoginPage() {
   const [loading, setLoading] = useState(false);
 
   const { register, handleSubmit, formState } = useForm<LoginForm>({
-    defaultValues: { username: 'admin', password: '' },
+    defaultValues: { username: '', password: '' },
   });
 
   const onSubmit = async (data: LoginForm) => {
@@ -41,7 +43,6 @@ export function AdminLoginPage() {
       <div className="w-full max-w-md card">
         <div className="mb-6 text-center">
           <h1 className="text-2xl font-bold text-brand-700">冰龍遊戲 後台</h1>
-          <p className="mt-1 text-sm text-slate-500">Admin Login</p>
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
@@ -61,7 +62,7 @@ export function AdminLoginPage() {
             <label className="label">密碼</label>
             <input
               type="password"
-              {...register('password', { required: '請輸入密碼', minLength: { value: 8, message: '至少 8 字元' } })}
+              {...register('password', { required: '請輸入密碼' })}
               className="input mt-1"
               autoComplete="current-password"
             />
@@ -79,10 +80,6 @@ export function AdminLoginPage() {
           <button type="submit" disabled={loading} className="btn-primary w-full">
             {loading ? '登入中...' : '登入'}
           </button>
-
-          <p className="text-center text-xs text-slate-400">
-            預設帳號:admin / admin123(僅 dev)
-          </p>
         </form>
       </div>
     </div>

@@ -14,7 +14,11 @@ import { AdminCategoriesController } from './categories/admin-categories.control
 import { AdminCategoriesService } from './categories/admin-categories.service';
 import { AdminUsersController } from './users/admin-users.controller';
 import { AdminUsersService } from './users/admin-users.service';
+import { AdminMediaController } from './media/admin-media.controller';
+import { AdminMediaService } from './media/admin-media.service';
+import { MediaBackfillService } from './media/media-backfill.service';
 import { AdminAuditService } from './audit/admin-audit.service';
+import { AdminBootstrapService } from './bootstrap/admin-bootstrap.service';
 
 import { AdminJwtGuard } from '../../common/guards/admin-jwt.guard';
 import { AdminIpWhitelistGuard } from '../../common/guards/admin-ip-whitelist.guard';
@@ -65,15 +69,19 @@ import { CallbackModule } from '../callback/callback.module';
     AdminProductsController,
     AdminCategoriesController,
     AdminUsersController,
+    AdminMediaController,
   ],
   providers: [
     AdminAuthService,
     AdminAuditService,
+    AdminBootstrapService,
     AdminDashboardService,
     AdminOrdersService,
     AdminProductsService,
     AdminCategoriesService,
     AdminUsersService,
+    AdminMediaService,
+    MediaBackfillService,
     AdminJwtGuard,
     AdminIpWhitelistGuard,
   ],

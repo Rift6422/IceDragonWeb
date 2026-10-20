@@ -77,12 +77,17 @@ model Category {
   /// 排序(小到大),tab 順序用
   sortOrder   Int             @default(0) @map("sort_order")
   status      ProductStatus   @default(ACTIVE)
+  /// 軟刪除時間;非 null = 已刪除,後台列表 + 玩家前台都看不到。
+  /// 跟 status=INACTIVE「下架」分開:下架可重新上架,刪除等於從列表移除。
+  /// 刪除時同時把底下 products.categoryId 設 null(歸到「未分類」)
+  deletedAt   DateTime?       @map("deleted_at") @db.Timestamptz()
   createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt   DateTime        @updatedAt @map("updated_at") @db.Timestamptz()
 
   products    Product[]
 
   @@index([status, sortOrder])
+  @@index([deletedAt])
   @@map("categories")
 }
 
@@ -106,11 +111,16 @@ model Product {
   playfabItemId  String?       @map("playfab_item_id")
   /// PlayFab storeID — 限購查詢時帶入。空時用 GAME_BACKEND_STORE_ID 環境變數
   playfabStoreId String?       @map("playfab_store_id")
+  /// PlayFab CatalogVersion — 派發 grantrmproduct 時帶入。空時用 GAME_BACKEND_CATALOG 環境變數
+  playfabCatalog String?       @map("playfab_catalog")
   /// 分類 FK — 空時 fallback by code prefix(BUNDLE_* → 超值禮包,其餘 → 啟源石)
   categoryId     String?       @map("category_id") @db.Uuid
   category       Category?     @relation(fields: [categoryId], references: [id])
   status         ProductStatus @default(ACTIVE)
   sortOrder      Int           @default(0) @map("sort_order")
+  /// 軟刪除時間;非 null = 已刪除,後台列表 + 玩家前台都看不到。
+  /// 跟 status=INACTIVE「下架」分開:下架可重新上架、保留在列表;刪除從列表移除
+  deletedAt      DateTime?     @map("deleted_at") @db.Timestamptz()
   createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz()
 
@@ -119,7 +129,31 @@ model Product {
   @@index([status, sortOrder])
   @@index([playfabItemId])
   @@index([categoryId])
+  @@index([deletedAt])
   @@map("products")
+}
+
+// ============================================================
+// 2.5 媒體資產(Media)— 圖庫
+// 商品圖示 / 廣告圖 / 後台素材集中管理。檔案存 Volume(UPLOAD_DIR),DB 只存 metadata。
+// ============================================================
+
+model MediaAsset {
+  id           String    @id @default(uuid()) @db.Uuid
+  /// 儲存檔名(UUID + 副檔名,避免 path traversal)
+  filename     String    @unique
+  /// 用戶上傳時的原始檔名(顯示用)
+  originalName String?   @map("original_name")
+  mimeType     String    @map("mime_type")
+  sizeBytes    Int       @map("size_bytes")
+  /// 上傳的 admin user id
+  uploadedBy   String    @map("uploaded_by") @db.Uuid
+  uploadedAt   DateTime  @default(now()) @map("uploaded_at") @db.Timestamptz()
+  deletedAt    DateTime? @map("deleted_at") @db.Timestamptz()
+
+  @@index([uploadedAt(sort: Desc)])
+  @@index([deletedAt])
+  @@map("media_assets")
 }
 
 // ============================================================
@@ -166,6 +200,22 @@ model Order {
   paidAt          DateTime?   @map("paid_at") @db.Timestamptz()
   confirmedAt     DateTime?   @map("confirmed_at") @db.Timestamptz()
   deliveredAt     DateTime?   @map("delivered_at") @db.Timestamptz()
+  /// 建單時玩家瀏覽器 IP — FB CAPI user_data.client_ip_address 用
+  clientIp        String?     @map("client_ip") @db.Inet
+  /// 建單時玩家瀏覽器 User-Agent — FB CAPI user_data.client_user_agent 用
+  clientUserAgent String?     @map("client_user_agent") @db.VarChar(500)
+  /// FB Pixel cookie `_fbp`(瀏覽器 cookie) — FB CAPI user_data.fbp,跨裝置歸因關鍵欄位
+  fbp             String?     @map("fbp") @db.VarChar(200)
+  /// FB Pixel cookie `_fbc`(廣告點擊 fbclid) — FB CAPI user_data.fbc,廣告歸因關鍵欄位
+  /// 新版 fbclid(`_aem_` 格式)衍生的 fbc 可達 200+ 字元 → 放寬到 512,不然 FB 貼文點進來會建不了單
+  fbc             String?     @map("fbc") @db.VarChar(512)
+  /// FB CAPI 已送出時間;null = 未送、重複 DELIVERED 不再送
+  fbCapiSentAt    DateTime?   @map("fb_capi_sent_at") @db.Timestamptz()
+  /// 遊戲端鎖已「確認解除」的時間。
+  /// null = 終態但 Unlock 尚未確認成功(終態解鎖是 fire-and-forget,可能失敗)
+  ///       → 對帳 sweep(OrderReconciliationService)會挑出來重試 Unlock。
+  /// 非 null = 已確認解鎖,sweep 跳過。
+  gameUnlockedAt  DateTime?   @map("game_unlocked_at") @db.Timestamptz()
 
   user             User                 @relation(fields: [userId], references: [id])
   product          Product              @relation(fields: [productId], references: [id])
@@ -177,6 +227,8 @@ model Order {
   @@index([userId, status])
   @@index([status, createdAt])
   @@index([createdAt(sort: Desc)])
+  /// 對帳 sweep:撈「終態但未確認解鎖」的單(status + game_unlocked_at IS NULL)
+  @@index([status, gameUnlockedAt])
   @@map("orders")
 }
 
@@ -209,6 +261,8 @@ model Transaction {
   authCode           String?   @unique @map("auth_code") @db.VarChar(512)
   /// MyCard 交易序號 TradeSeq
   tradeSeq           String?   @map("trade_seq")
+  /// AuthGlobal 回傳的 MyCard 跳轉付款網址 — 玩家未付款重點同商品時 resume 回同一個 session
+  transactionUrl     String?   @map("transaction_url") @db.VarChar(1024)
   /// MyCard 卡片號 / Billing 號 / CGM 號 — 防重複儲值的最後一道閘門
   mycardTradeNo      String?   @unique @map("mycard_trade_no")
   /// INGAME / COSTPOINT / FA200000002...

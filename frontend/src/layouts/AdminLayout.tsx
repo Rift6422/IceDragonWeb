@@ -1,16 +1,19 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { useAuthStore } from '@/features/auth/auth.store';
+import { useDocumentTitle } from '@/utils/useDocumentTitle';
 
 const nav = [
   { to: '/admin/dashboard', label: '儀表板' },
   { to: '/admin/orders', label: '訂單' },
   { to: '/admin/products', label: '商品' },
   { to: '/admin/categories', label: '商品分類' },
+  { to: '/admin/media', label: '圖庫' },
   { to: '/admin/users', label: '玩家' },
 ];
 
 export function AdminLayout() {
+  useDocumentTitle('冰龍遊戲 後台');
   const admin = useAuthStore((s) => s.admin);
   const logout = useAuthStore((s) => s.logout);
   const navigate = useNavigate();

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   createProduct,
   deactivateProduct,
+  deleteProduct,
   fetchCategories,
   fetchProducts,
   updateProduct,
@@ -11,14 +12,18 @@ import {
   type CreateProductInput,
 } from '@/api/admin';
 import { extractErrorMessage } from '@/api/client';
+import { StaticBackdrop } from '@/components/StaticBackdrop';
+import { STORE_BASE_PATH } from '@/lib/game-namespace';
+import { MediaPicker } from '@/components/MediaPicker';
 
 // ============================================================
 // 後台商品管理:列表 + Modal 表單(新增 / 編輯共用)
-// 表單支援完整 effects JSON 編輯:
-//   - 基本欄位:code, name_display, name_internal, amount, sort_order, status
-//   - 展示:icon emoji, purchase_limit_label
-//   - 包含內容:effects 陣列(每筆 type / code / display_label / amount)
-//   - 信件:mail.subject / body / expire_days
+// 表單欄位:
+//   - 基本欄位:code, name_display, amount, sort_order, status
+//   - 展示:icon, purchase_limit_label
+//   - 商品說明:description 自由文字(玩家 modal 顯示;取代舊的 effects 陣列編輯器)
+//   - PlayFab 對應:playfab_item_id / store_id / catalog
+// 註:effects JSON 仍保留(派發 metadata),但後台不再逐項編輯,只在儲存時保留原值。
 // ============================================================
 
 interface ProductFormState {
@@ -30,7 +35,10 @@ interface ProductFormState {
   purchase_limit_label: string;
   playfab_item_id: string;
   playfab_store_id: string;
+  playfab_catalog: string;
   category_id: string;
+  /** 自由文字商品說明(玩家 modal 顯示)*/
+  description: string;
 }
 
 const EMPTY_FORM: ProductFormState = {
@@ -42,7 +50,9 @@ const EMPTY_FORM: ProductFormState = {
   purchase_limit_label: '',
   playfab_item_id: '',
   playfab_store_id: '',
+  playfab_catalog: '',
   category_id: '',
+  description: '',
 };
 
 function isImageIcon(s: string): boolean {
@@ -91,6 +101,11 @@ export function AdminProductsPage() {
 
   const reactivateMut = useMutation({
     mutationFn: (id: string) => updateProduct(id, { status: 'ACTIVE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'products'] }),
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => deleteProduct(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'products'] }),
   });
 
@@ -196,9 +211,11 @@ export function AdminProductsPage() {
                       {p.status === 'ACTIVE' ? (
                         <button
                           onClick={() => {
-                            if (confirm(`確定下架 ${p.playfabItemId || p.code}?`)) deactivateMut.mutate(p.id);
+                            if (confirm(`確定下架 ${p.playfabItemId || p.code}?(可重新上架)`)) {
+                              deactivateMut.mutate(p.id);
+                            }
                           }}
-                          className="text-red-600 hover:underline"
+                          className="text-amber-600 hover:underline"
                         >
                           下架
                         </button>
@@ -210,6 +227,20 @@ export function AdminProductsPage() {
                           重新上架
                         </button>
                       )}
+                      <button
+                        onClick={() => {
+                          if (
+                            confirm(
+                              `⚠ 確定「刪除」${p.playfabItemId || p.code}?\n刪除後從後台列表消失,歷史訂單仍保留。`,
+                            )
+                          ) {
+                            deleteMut.mutate(p.id);
+                          }
+                        }}
+                        className="text-red-600 hover:underline"
+                      >
+                        刪除
+                      </button>
                     </td>
                   </tr>
                 );
@@ -261,7 +292,7 @@ function CopyLinkButton({ code }: { code: string }) {
 
   const handleCopy = async () => {
     const base = window.location.origin;
-    const url = `${base}/?item=${encodeURIComponent(code)}`;
+    const url = `${base}${STORE_BASE_PATH}/?item=${encodeURIComponent(code)}`;
     try {
       await navigator.clipboard.writeText(url);
       setCopied(true);
@@ -309,6 +340,7 @@ function ProductFormModal({
     product ? productToForm(product) : EMPTY_FORM,
   );
   const [validationErr, setValidationErr] = useState<string | null>(null);
+  const [mediaPickerOpen, setMediaPickerOpen] = useState(false);
 
   useEffect(() => {
     setForm(product ? productToForm(product) : EMPTY_FORM);
@@ -347,7 +379,7 @@ function ProductFormModal({
     }
 
     // effects 內容由遊戲端 PlayFab catalog 主控,後台只維護 web 端展示資訊
-    // 保留既有商品的 effects(避免清空後派發少資料);新建商品 effects 留空
+    // 保留既有商品的 effects(派發 metadata + 舊資料 fallback 顯示),只更新 icon / 限購標籤
     const existingEffects =
       mode === 'edit' && product?.effects && typeof product.effects === 'object'
         ? (product.effects as Record<string, unknown>)
@@ -364,28 +396,24 @@ function ProductFormModal({
       // 內部名稱不再分離,直接同步顯示名稱(後台 / 對帳查詢仍可用)
       name_display: form.name_display,
       name_internal: form.name_display,
+      description: form.description.trim() || undefined,
       amount: form.amount,
       sort_order: parseInt(form.sort_order, 10) || 0,
       status: form.status,
       effects: effectsJson,
       playfab_item_id: playfabItemId || undefined,
       playfab_store_id: form.playfab_store_id.trim() || undefined,
+      playfab_catalog: form.playfab_catalog.trim() || undefined,
       category_id: form.category_id || undefined,
     });
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/60 px-4 py-8"
-      onClick={onCancel}
-    >
-      <div
-        className="w-full max-w-2xl overflow-hidden rounded-xl bg-white shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <StaticBackdrop boxClassName="w-full max-w-2xl">
+      <div className="overflow-hidden rounded-xl bg-white shadow-2xl">
         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-3">
           <h2 className="text-lg font-semibold">
-            {mode === 'create' ? '新增商品' : `編輯商品 — ${product?.code}`}
+            {mode === 'create' ? '新增商品' : `編輯商品 — ${product?.nameDisplay ?? product?.code}`}
           </h2>
           <button
             onClick={onCancel}
@@ -410,7 +438,7 @@ function ProductFormModal({
                 />
               </Field>
             )}
-            <Field label="顯示名稱(玩家看到)">
+            <Field label="顯示名稱">
               <input
                 type="text"
                 value={form.name_display}
@@ -421,7 +449,7 @@ function ProductFormModal({
                 required
               />
             </Field>
-            <Field label="商品分類(必填)" hint="若清單空白,請先到「商品分類」頁建立">
+            <Field label="商品分類(必填)">
               <select
                 value={form.category_id}
                 onChange={(e) => update('category_id', e.target.value)}
@@ -471,17 +499,26 @@ function ProductFormModal({
           {/* 展示 */}
           <Section title="玩家端展示">
             <Field
-              label="圖示(可填 emoji 或 圖片路徑 /icons/xxx.jpg)"
-              hint="路徑型(/ 或 http:// 開頭)會用 <img> render;其他文字當 emoji"
+              label="圖示(圖庫圖片、自訂 URL)"
             >
               <div className="space-y-3">
-                <input
-                  type="text"
-                  value={form.icon}
-                  onChange={(e) => update('icon', e.target.value)}
-                  className="input"
-                  placeholder="🎁  或  /icons/bundle-default.jpg"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={form.icon}
+                    onChange={(e) => update('icon', e.target.value)}
+                    className="input flex-1"
+                    placeholder="🎁  或  /uploads/xxx.jpg"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setMediaPickerOpen(true)}
+                    className="btn-secondary whitespace-nowrap"
+                    title="從圖庫選圖或上傳新圖"
+                  >
+                    📁 圖庫
+                  </button>
+                </div>
 
                 {/* 即時預覽 */}
                 {form.icon && (
@@ -515,6 +552,16 @@ function ProductFormModal({
             </Field>
           </Section>
 
+          {/* 商品說明 — 自由文字,玩家點進商品 modal 會看到 */}
+          <Section title="商品說明(玩家點進商品 modal 會看到)">
+            <textarea
+              value={form.description}
+              onChange={(e) => update('description', e.target.value)}
+              className="input min-h-[120px] resize-y leading-relaxed"
+              maxLength={3000}
+            />
+          </Section>
+
           {/* PlayFab 對應 */}
           <Section title="PlayFab 對應(限購由遊戲端控管)">
             <div className="grid grid-cols-2 gap-3">
@@ -537,6 +584,16 @@ function ProductFormModal({
                   onChange={(e) => update('playfab_store_id', e.target.value)}
                   className="input font-mono"
                   placeholder="RMPacksStore"
+                  maxLength={64}
+                />
+              </Field>
+              <Field label="PlayFab Catalog">
+                <input
+                  type="text"
+                  value={form.playfab_catalog}
+                  onChange={(e) => update('playfab_catalog', e.target.value)}
+                  className="input font-mono"
+                  placeholder="GAME_BACKEND_CATALOG"
                   maxLength={64}
                 />
               </Field>
@@ -564,7 +621,14 @@ function ProductFormModal({
           </div>
         </form>
       </div>
-    </div>
+
+      {mediaPickerOpen && (
+        <MediaPicker
+          onSelect={(url) => update('icon', url)}
+          onClose={() => setMediaPickerOpen(false)}
+        />
+      )}
+    </StaticBackdrop>
   );
 }
 
@@ -615,6 +679,8 @@ function productToForm(p: AdminProduct): ProductFormState {
     purchase_limit_label: e.purchase_limit_label ?? '',
     playfab_item_id: p.playfabItemId ?? '',
     playfab_store_id: p.playfabStoreId ?? '',
+    playfab_catalog: p.playfabCatalog ?? '',
     category_id: p.categoryId ?? '',
+    description: p.description ?? '',
   };
 }

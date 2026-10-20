@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -58,8 +59,19 @@ export class OrdersService {
    *   5. 成功 → state.transition(PENDING → AUTHED)+ 存 auth_code
    *   6. 回前端 TransactionUrl(導頁去 MyCard)
    */
-  async create(dto: CreateOrderDto): Promise<CreateOrderResult> {
+  async create(
+    dto: CreateOrderDto,
+    ctx: {
+      clientIp: string | null;
+      clientUserAgent: string | null;
+      origin?: string | null;
+    } = {
+      clientIp: null,
+      clientUserAgent: null,
+    },
+  ): Promise<CreateOrderResult> {
     const uid = dto.uid.toUpperCase();
+    this.logger.log(`[order-flow] ① 收到建單請求 uid=${uid} product=${dto.productCode}`);
 
     // (1) 找 GameUser,沒有就自動建立
     //
@@ -88,23 +100,74 @@ export class OrdersService {
     if (product.status !== 'ACTIVE') {
       throw new BadRequestException(`商品已下架:${dto.productCode}`);
     }
+    this.logger.log(
+      `[order-flow] ② 商品確認 code=${product.code} itemId=${product.playfabItemId ?? '(無 PlayFab itemId,跳過限購/鎖檢查)'} storeId=${product.playfabStoreId ?? this.config.get('GAME_BACKEND_STORE_ID') ?? '(預設)'}`,
+    );
 
     // (2.5) 限購 pre-check(若該商品有 PlayFab itemId)
     //
-    // 找不到 itemID(回 null)= 沒在 GameBackend 設限 → 允許購買
-    // left_quantity <= 0 → 拒絕,前端顯示已達上限
+    // 走 /api/getstoreitems 一次拿全 store,從中找對應 itemId:
+    //   找不到 itemID = 沒在 GameBackend 設限 → 允許購買
+    //   limitation = null = 該品項無限購 → 允許購買
+    //   left_quantity <= 0 → 拒絕,前端顯示已達上限
     // GameBackend 失敗時 service 內部會 swallow + 回空 → 不擋主流程,信任派發端最後再擋
     if (product.playfabItemId) {
-      const limit = await this.gameBackend.getItemLimitation(
-        uid,
-        product.playfabItemId,
-        product.playfabStoreId ?? undefined,
-      );
-      if (limit && limit.left_quantity <= 0) {
-        throw new BadRequestException(
-          `此商品已達購買上限(${limit.max_quantity}/${limit.max_quantity})`,
+      const effectiveStoreId =
+        product.playfabStoreId ?? this.config.get<string>('GAME_BACKEND_STORE_ID');
+      if (effectiveStoreId) {
+        const { storeItems, ownPremiums } = await this.gameBackend.getStoreItems(uid, [
+          effectiveStoreId,
+        ]);
+
+        // (a) 月卡類 premium:已擁有 → 直接拒絕(優先於限購檢查)
+        if (ownPremiums.includes(product.playfabItemId)) {
+          this.logger.warn(
+            `[order-flow] ✗ 擋下單(已擁有) uid=${uid} itemId=${product.playfabItemId}`,
+          );
+          throw new BadRequestException('您已擁有此商品,無法再次購買');
+        }
+
+        // (b) 一般限購:剩餘額度 <= 0 → 拒絕(下次重置後可再買)
+        const items = storeItems.get(effectiveStoreId) ?? [];
+        const item = items.find((i) => i.item_id === product.playfabItemId);
+        const lim = item?.limitation ?? null;
+        if (lim && lim.left_quantity <= 0) {
+          this.logger.warn(
+            `[order-flow] ✗ 擋下單(已達購買上限 ${lim.max_quantity}/${lim.max_quantity}) uid=${uid} itemId=${product.playfabItemId}`,
+          );
+          throw new BadRequestException(
+            `此商品已達購買上限(${lim.max_quantity}/${lim.max_quantity})`,
+          );
+        }
+        this.logger.log(
+          `[order-flow] ②.5 限購檢查通過 itemId=${product.playfabItemId} left=${lim ? lim.left_quantity : '無限'}`,
         );
       }
+    }
+
+    // (2.6) 解自己的未完成單(resume)+ 遊戲端鎖預檢
+    //   - 自己上一筆未付款單(AUTHED)→ **回同一個 AuthCode / 跳轉**(resume,不開新單)
+    //       → 全程只有一個可付款 session,MyCard 最多收一次,防雙分頁/重複建單重複扣款
+    //   - 自己未完成單但已付款 → 擋下,叫他去「我的訂單」
+    //   - PENDING(沒 AuthCode 的半殘單)→ 取消+解鎖,往下重建
+    //   - 鎖定中但不是自己的(其他端口 Google/Apple)→ 擋下
+    //   - 遊戲端系統異常(success:false)→ 擋下
+    const itemId = product.playfabItemId;
+    const storeId = itemId
+      ? product.playfabStoreId ?? this.config.get<string>('GAME_BACKEND_STORE_ID') ?? null
+      : null;
+    const resolved = await this.resolveOwnOrderAndLock({
+      userId: user.id,
+      productId: product.id,
+      uid,
+      itemId,
+      storeId,
+    });
+    if (resolved.resume) {
+      this.logger.log(
+        `[order-flow] ②.6 resume 玩家未付款單 ${resolved.resume.fac_trade_seq} → 回同一個 AuthCode,不開新單`,
+      );
+      return resolved.resume;
     }
 
     // (3) 產 FacTradeSeq + 建單(PENDING)
@@ -118,6 +181,10 @@ export class OrdersService {
         amount: product.amount,
         currency: product.currency,
         status: OrderStatus.PENDING,
+        clientIp: ctx.clientIp,
+        clientUserAgent: ctx.clientUserAgent?.slice(0, 500) ?? null,
+        fbp: dto.fbp?.slice(0, 200) ?? null,
+        fbc: dto.fbc?.slice(0, 512) ?? null,
         transaction: {
           create: {}, // 預建 1:1 transaction row(後續更新欄位)
         },
@@ -136,8 +203,16 @@ export class OrdersService {
       },
     });
 
+    this.logger.log(
+      `[order-flow] ③ 訂單已建立 facTradeSeq=${facTradeSeq} orderId=${order.id} status=PENDING`,
+    );
+
+    // 註:web 不再主動送 Lock。鎖的生命週期(上鎖 / 解鎖 / TTL 自清)全交由伺服器端自管,
+    //   web 只在建單前用 checkOrderAvailable(getneworderavailable)查可否購買(見 2.6)。
+
     // (4) 呼叫 AuthGlobal
-    const facReturnURL = this.buildFacReturnURL();
+    const facReturnURL = this.buildFacReturnURL(ctx.origin);
+    this.logger.log(`[order-flow] ④ 呼叫 MyCard AuthGlobal facTradeSeq=${facTradeSeq}`);
     const result = await this.mycard.authGlobal({
       facTradeSeq,
       customerId: uid,
@@ -152,6 +227,9 @@ export class OrdersService {
 
     if (!result.ok || !result.data.AuthCode || !result.data.TransactionUrl) {
       // AuthGlobal 失敗 → 訂單轉 FAILED
+      this.logger.warn(
+        `[order-flow] ✗ AuthGlobal 失敗 facTradeSeq=${facTradeSeq} code=${result.returnCode} msg=${result.returnMsg}`,
+      );
       await this.state.transition({
         orderId: order.id,
         toStatus: OrderStatus.FAILED,
@@ -167,6 +245,7 @@ export class OrdersService {
       data: {
         authCode: result.data.AuthCode,
         tradeSeq: result.data.TradeSeq ?? null,
+        transactionUrl: result.data.TransactionUrl,
         authRawResponse: result.data as unknown as Prisma.InputJsonValue,
       },
     });
@@ -176,6 +255,7 @@ export class OrdersService {
       triggeredBy: 'system',
       reason: 'AuthGlobal success',
     });
+    this.logger.log(`[order-flow] ⑤ AUTHED facTradeSeq=${facTradeSeq} — 回傳前端跳轉 MyCard`);
 
     // (6) 回前端
     return {
@@ -246,22 +326,33 @@ export class OrdersService {
     const order = await this.prisma.order.findUnique({
       where: { facTradeSeq },
       include: {
-        product: { select: { code: true, nameDisplay: true } },
+        product: { select: { code: true, nameDisplay: true, playfabItemId: true } },
         transaction: {
-          select: { mycardTradeNo: true, paymentType: true, payResult: true },
+          select: { mycardTradeNo: true, paymentType: true, payResult: true, resultRawBody: true },
         },
       },
     });
     if (!order) throw new NotFoundException(`訂單不存在`);
+    // MyCard trade-result 的 ReturnCode(原始 body 留底)— 供前端顯示失敗代碼
+    const raw = order.transaction?.resultRawBody as Record<string, unknown> | null;
+    const returnCode =
+      raw && typeof raw === 'object' && typeof raw.ReturnCode === 'string' ? raw.ReturnCode : null;
     return {
       fac_trade_seq: order.facTradeSeq,
       status: order.status,
       amount: order.amount.toString(),
       currency: order.currency,
       product_code: order.product.code,
+      // 遊戲端 itemId(送 PlayFab / 遊戲端的識別碼),供 WebView 回傳 Unity 對應發放道具
+      game_item_id: order.product.playfabItemId,
       product_name: order.product.nameDisplay,
       payment_type: order.transaction?.paymentType,
       pay_result: order.transaction?.payResult,
+      // MyCard 交易失敗時回傳的 ReturnMsg(已 URL-decode);前端失敗畫面顯示
+      failure_reason: order.failureReason,
+      // MyCard trade-result 回傳的代碼/訊息(前端失敗畫面顯示 ReturnCode + ReturnMsg)
+      return_code: returnCode,
+      return_msg: order.failureReason,
       created_at: order.createdAt,
       paid_at: order.paidAt,
       delivered_at: order.deliveredAt,
@@ -269,14 +360,231 @@ export class OrdersService {
   }
 
   // ============================================================
+  // 玩家:離開付款頁 → 主動取消未完成單(best-effort,給前端用)
+  // ============================================================
+
+  /**
+   * 玩家從 MyCard 付款頁跳回商城(按上一頁 / 關閉)時,前端打這支主動把
+   * 剛剛那筆未完成單取消掉,讓商品狀態收斂,不必等補儲 / 對帳。
+   *
+   * 安全閘:AUTHED 的單先 TradeQuery 問 MyCard 付了沒 —— 玩家可能其實付了
+   * 只是跳回來,這種**絕不能**取消,交給 callback 正常派發。
+   *
+   * FacTradeSeq 為隨機字串(弱認證,同既有查單),MVP 可接受。
+   */
+  async releaseAbandonedOrder(
+    facTradeSeq: string,
+  ): Promise<{ released: boolean; reason: string }> {
+    const order = await this.prisma.order.findUnique({
+      where: { facTradeSeq },
+      include: { transaction: true, user: { select: { uid: true } } },
+    });
+    if (!order) return { released: false, reason: 'not_found' };
+
+    // 只處理未完成單;終態不動
+    if (order.status !== OrderStatus.PENDING && order.status !== OrderStatus.AUTHED) {
+      return { released: false, reason: 'not_pending' };
+    }
+
+    // AUTHED:先確認玩家是不是其實付了(避免取消已付款單)
+    if (order.status === OrderStatus.AUTHED && order.transaction?.authCode) {
+      const q = await this.mycard.tradeQuery(order.transaction.authCode, order.id);
+      if (q.ok && q.data?.PayResult === '3') {
+        this.logger.log(
+          `[order-abandon] ${facTradeSeq} 其實已付款(PayResult=3)→ 不取消,交由 callback 派發`,
+        );
+        return { released: false, reason: 'paid' };
+      }
+    }
+
+    this.logger.log(
+      `[order-abandon] 玩家離開付款頁,取消未完成單 ${facTradeSeq}(${order.status})`,
+    );
+    await this.state.transition({
+      orderId: order.id,
+      toStatus: OrderStatus.CANCELLED,
+      triggeredBy: 'player',
+      reason: '玩家離開 MyCard 付款頁,主動取消',
+    });
+    return { released: true, reason: 'cancelled' };
+  }
+
+  // ============================================================
   // 私有工具
   // ============================================================
 
-  private buildFacReturnURL(): string {
+  /**
+   * 建單前:解析玩家自己的未完成單(resume / 取消)+ 可購查詢。
+   *
+   * 註:web 不上鎖,鎖由伺服器端自管;這裡的「鎖檢查」只是 getneworderavailable
+   *     查詢可否購買(只查不鎖)。
+   *
+   * 順序很重要 —— 先處理「自己的單」,再判斷是不是別人佔著:
+   *   1. 找自己同商品的未完成單(PENDING/AUTHED)
+   *      · AUTHED + 有 AuthCode:
+   *          - TradeQuery 已付款 → 擋(叫他去「我的訂單」,不重開 session)
+   *          - 沒付 + 有存 transactionUrl → **resume**:回同一個 AuthCode / 跳轉(不開新單)
+   *          - 沒付 + 沒 transactionUrl(舊單)→ 取消,往下重建
+   *      · PENDING(沒 AuthCode 的半殘單)→ 取消,往下重建
+   *   2. 可購查詢(僅該商品有 playfabItemId + 有設 LOCK code 時)
+   *      · 可購 → 放行建新單
+   *      · 不可購(自己的單已在步驟 1 清掉)→ 其他端口(Google/Apple)佔著 → 擋
+   *      · 系統異常(success:false)→ 擋
+   *
+   * resume 的意義:同一個 (玩家, 商品) 未付款期間永遠只有一個可付款的 AuthCode,
+   * MyCard 端最多收一次 → 從根上消除雙分頁 / 重複建單的重複扣款窗口。
+   *
+   * @returns resume 非 null = 呼叫端直接 return 該跳轉,不再開新單。
+   */
+  private async resolveOwnOrderAndLock(input: {
+    userId: string;
+    productId: string;
+    uid: string;
+    itemId: string | null;
+    storeId: string | null;
+  }): Promise<{ resume: CreateOrderResult | null }> {
+    const { userId, productId, uid, itemId, storeId } = input;
+
+    // 1. 自己同商品的未完成單
+    const own = await this.prisma.order.findFirst({
+      where: {
+        userId,
+        productId,
+        status: { in: [OrderStatus.PENDING, OrderStatus.AUTHED] },
+      },
+      orderBy: { createdAt: 'desc' },
+      include: { transaction: true },
+    });
+
+    if (own) {
+      if (own.status === OrderStatus.AUTHED && own.transaction?.authCode) {
+        // 先問 MyCard 付了沒 —— 已付絕不能重開 session
+        this.logger.log(
+          `[order-flow] ②.6 偵測到自己未完成單 ${own.facTradeSeq}(AUTHED)→ TradeQuery 確認付款狀態`,
+        );
+        const q = await this.mycard.tradeQuery(own.transaction.authCode, own.id);
+        if (q.ok && q.data?.PayResult === '3') {
+          this.logger.warn(
+            `[order-flow] ✗ 擋下單(自己上一筆已付款 ${own.facTradeSeq})→ 不重複建單`,
+          );
+          throw new ConflictException(
+            '您這筆訂單已付款,正在為您處理,請至「我的訂單」查看,請勿重複付款',
+          );
+        }
+        // 沒付 + 有跳轉網址 → resume 回同一個 AuthCode
+        if (own.transaction.transactionUrl) {
+          return {
+            resume: {
+              order_id: own.id,
+              fac_trade_seq: own.facTradeSeq,
+              redirect_url: own.transaction.transactionUrl,
+              status: OrderStatus.AUTHED,
+            },
+          };
+        }
+        this.logger.warn(
+          `[order-flow] ②.6 未付款單 ${own.facTradeSeq} 無 transactionUrl(舊單)→ 取消重建`,
+        );
+      }
+      // PENDING 半殘單 / AUTHED 無跳轉網址 → 取消,往下重建
+      await this.cancelOwnUnpaidOrder(own.id, own.facTradeSeq, own.status);
+    }
+
+    // 2. 遊戲端鎖檢查(沒 itemId/storeId = 該商品不走鎖,直接放行)
+    if (!itemId || !storeId) {
+      return { resume: null };
+    }
+    const check = await this.gameBackend.checkOrderAvailable({ playerId: uid, storeId, itemId });
+    if (check.ok) {
+      this.logger.log(
+        `[order-flow] ②.6 遊戲端鎖狀態檢查通過(可購) itemId=${itemId} (${check.durationMs}ms)`,
+      );
+      return { resume: null };
+    }
+    if (!check.locked) {
+      // 系統異常(success:false)
+      this.logger.error(
+        `[order-flow] ✗ 擋下單(遊戲端訂單系統異常) uid=${uid} itemId=${itemId} (${check.durationMs}ms)`,
+      );
+      throw new ServiceUnavailableException(
+        check.errorMessage ?? '遊戲端確認訂單系統異常,請稍後再試',
+      );
+    }
+    // 鎖定中 + 自己的單已在步驟 1 清掉 → 其他端口(Google/Apple)
+    this.logger.warn(`[order-flow] ✗ 擋下單(其他端口鎖定中) uid=${uid} itemId=${itemId}`);
+    throw new ConflictException('已由其他端口進行付款,訂單暫時鎖定,請稍後再試');
+  }
+
+  /** 取消玩家自己的未完成單(無 transactionUrl 可 resume 時,取消後重建)*/
+  private async cancelOwnUnpaidOrder(
+    orderId: string,
+    facTradeSeq: string,
+    status: OrderStatus,
+  ): Promise<void> {
+    this.logger.log(`[order-flow] ②.6 取消玩家自己的舊單 ${facTradeSeq}(${status})→ 重建`);
+    await this.state.transition({
+      orderId,
+      toStatus: OrderStatus.CANCELLED,
+      triggeredBy: 'system',
+      reason: '玩家重新購買同商品,取消自身未完成單',
+    });
+  }
+
+  /**
+   * MyCard「返回商家 / 交易結果回傳」網址。
+   *
+   * 同一部署同時服務 pay / pay-test(和 localhost)多網域:玩家從哪個網域來,
+   * 付款完就回哪個。origin 由 controller 從 request 的 Origin / X-Forwarded-Host 取得。
+   *
+   * origin 來自 client header,可被偽造 → 只接受白名單內的網域,否則 fallback
+   * 到固定 env `MYCARD_FAC_RETURN_URL`(防開放轉址 / callback 被導去他站)。
+   */
+  private buildFacReturnURL(origin?: string | null): string {
+    const normalized = this.normalizeAllowedOrigin(origin);
+    if (normalized) {
+      return `${normalized}/api/mycard/trade-result`;
+    }
     return this.config.get<string>(
       'MYCARD_FAC_RETURN_URL',
       'http://localhost:3000/api/mycard/trade-result',
     );
+  }
+
+  /**
+   * 驗證 client 傳來的 origin 是否在允許清單內。
+   *   - 合法 http(s):// origin
+   *   - host 命中 `PLAYER_RETURN_ORIGINS`(逗號分隔)清單,或 localhost/127.0.0.1
+   * 命不中回 null(呼叫端 fallback 到固定 env)。
+   */
+  private normalizeAllowedOrigin(origin?: string | null): string | null {
+    if (!origin) return null;
+    const trimmed = origin.trim().replace(/\/+$/, '');
+    let host: string;
+    try {
+      const u = new URL(trimmed);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      host = u.host.toLowerCase();
+    } catch {
+      return null;
+    }
+
+    const allowlist = (this.config.get<string>('PLAYER_RETURN_ORIGINS') ?? '')
+      .split(',')
+      .map((o) => o.trim().replace(/\/+$/, '').toLowerCase())
+      .filter(Boolean)
+      .map((o) => {
+        try {
+          return new URL(o).host;
+        } catch {
+          return o;
+        }
+      });
+
+    const isLocalhost = host.startsWith('localhost') || host.startsWith('127.0.0.1');
+    if (isLocalhost || allowlist.includes(host)) {
+      return trimmed;
+    }
+    return null;
   }
 
   private snapshotProduct(product: {
@@ -288,6 +596,7 @@ export class OrdersService {
     effects: unknown;
     playfabItemId: string | null;
     playfabStoreId: string | null;
+    playfabCatalog: string | null;
   }): Record<string, unknown> {
     return {
       code: product.code,
@@ -298,6 +607,7 @@ export class OrdersService {
       effects: product.effects,
       playfab_item_id: product.playfabItemId,
       playfab_store_id: product.playfabStoreId,
+      playfab_catalog: product.playfabCatalog,
       snapshot_at: new Date().toISOString(),
     };
   }

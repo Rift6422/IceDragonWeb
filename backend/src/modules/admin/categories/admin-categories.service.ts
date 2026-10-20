@@ -8,9 +8,13 @@ export class AdminCategoriesService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list(): Promise<{ total: number; items: Array<Category & { product_count: number }> }> {
+    // 已軟刪除的不顯示;product_count 也只算「未軟刪除」的商品
     const items = await this.prisma.category.findMany({
+      where: { deletedAt: null },
       orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
-      include: { _count: { select: { products: true } } },
+      include: {
+        _count: { select: { products: { where: { deletedAt: null } } } },
+      },
     });
     return {
       total: items.length,
@@ -19,7 +23,7 @@ export class AdminCategoriesService {
   }
 
   async detail(id: string): Promise<Category> {
-    const c = await this.prisma.category.findUnique({ where: { id } });
+    const c = await this.prisma.category.findFirst({ where: { id, deletedAt: null } });
     if (!c) throw new NotFoundException(`Category ${id} not found`);
     return c;
   }
@@ -50,12 +54,31 @@ export class AdminCategoriesService {
     });
   }
 
-  /** 軟刪除:status=INACTIVE,保留底下商品的 FK */
+  /** 停用:status=INACTIVE,保留底下商品的 FK,可重新啟用 */
   async deactivate(id: string): Promise<Category> {
     await this.detail(id);
     return this.prisma.category.update({
       where: { id },
       data: { status: ProductStatus.INACTIVE },
+    });
+  }
+
+  /**
+   * 軟刪除:設 deletedAt,從列表消失。
+   * 同 transaction 把底下所有 products 的 categoryId 設 null(歸到「未分類」)— 避免商品消失
+   */
+  async softDelete(id: string): Promise<{ category: Category; products_unlinked: number }> {
+    await this.detail(id);
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.product.updateMany({
+        where: { categoryId: id, deletedAt: null },
+        data: { categoryId: null },
+      });
+      const category = await tx.category.update({
+        where: { id },
+        data: { deletedAt: new Date(), status: ProductStatus.INACTIVE },
+      });
+      return { category, products_unlinked: updated.count };
     });
   }
 }

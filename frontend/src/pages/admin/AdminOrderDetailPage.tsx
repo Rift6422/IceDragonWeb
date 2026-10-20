@@ -75,11 +75,11 @@ export function AdminOrderDetailPage() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="font-semibold text-slate-900">補派獎至遊戲端</h3>
-            <p className="mt-1 text-xs text-slate-500">
-              {order.status === 'DELIVERED'
-                ? '此單已派發成功。如玩家堅稱未收到禮包,可強制重派 — 注意:會再呼叫一次 PlayFab grantrmproduct,可能導致玩家收到第二份禮包或多扣限購 quota。'
-                : '觸發後端 reprocessOne:打 MyCard TradeQuery 確認付款狀態,若已付款則 PaymentConfirm + 派發到 PlayFab。與 §3.6 supplement 同一支邏輯,有冪等保護。'}
-            </p>
+            {order.status === 'DELIVERED' && (
+              <p className="mt-1 text-xs text-slate-500">
+                此單已派發成功。如玩家堅稱未收到禮包,可強制重派 — 注意:會再呼叫一次 PlayFab grantrmproduct,可能導致玩家收到第二份禮包或多扣限購 quota。
+              </p>
+            )}
           </div>
           <button
             onClick={() => {
@@ -124,20 +124,47 @@ export function AdminOrderDetailPage() {
       </div>
 
       {/* Raw JSON toggle */}
-      <div className="card">
-        <button
-          onClick={() => setShowRaw((s) => !s)}
-          className="text-sm text-slate-600 hover:text-brand-600"
-        >
-          {showRaw ? '▼' : '▶'} 完整 JSON(含 callback / status history / delivery attempts)
-        </button>
+      <div className="card overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <button
+            onClick={() => setShowRaw((s) => !s)}
+            className="text-sm text-slate-600 hover:text-brand-600"
+          >
+            {showRaw ? '▼' : '▶'} 完整 JSON(含 callback / status history / delivery attempts)
+          </button>
+          {showRaw && <CopyJsonButton value={order} />}
+        </div>
         {showRaw && (
-          <pre className="mt-3 max-h-[600px] overflow-auto rounded bg-slate-900 p-4 text-xs text-slate-100">
-            {JSON.stringify(order, null, 2)}
-          </pre>
+          <div className="mt-3 max-w-full overflow-x-auto">
+            <pre className="max-h-[600px] overflow-y-auto rounded bg-slate-900 p-4 text-xs text-slate-100">
+              {JSON.stringify(order, null, 2)}
+            </pre>
+          </div>
         )}
       </div>
     </div>
+  );
+}
+
+function CopyJsonButton({ value }: { value: unknown }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        const json = JSON.stringify(value, null, 2);
+        try {
+          await navigator.clipboard.writeText(json);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          window.prompt('複製 JSON:', json);
+        }
+      }}
+      className="rounded border border-slate-300 px-3 py-1 text-xs text-slate-700 hover:bg-slate-100"
+    >
+      {copied ? '✓ 已複製' : '📋 複製 JSON'}
+    </button>
   );
 }
 

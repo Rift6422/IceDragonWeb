@@ -154,6 +154,19 @@ function OrderDetailBody({ order }: { order: PlayerOrderDetail }) {
         </section>
       )}
 
+      {/* 交易失敗:顯示 MyCard 回傳的 ReturnCode / ReturnMsg */}
+      {order.status === 'FAILED' && (order.return_code || order.return_msg || order.failure_reason) && (
+        <section className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700 sm:p-5">
+          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-rose-500">
+            交易失敗原因
+          </h2>
+          <p className="break-all leading-relaxed">
+            {order.return_code ? `[${order.return_code}]` : ''}
+            {order.return_msg || order.failure_reason}
+          </p>
+        </section>
+      )}
+
       {/* 派發失敗時的客服提示 */}
       {order.status === 'DELIVERY_FAILED' && (
         <section className="rounded-lg border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">

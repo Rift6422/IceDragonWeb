@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DeliveryStatus, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrderStateService } from '../orders/order-state.service';
+import { FbCapiService } from '../fb-capi/fb-capi.service';
 import { MAIL_DISPATCHER, MailDispatcher, DispatchResult } from './mail-dispatcher.interface';
 
 interface ProductEffectsJson {
@@ -13,6 +14,7 @@ interface ProductSnapshotShape {
   effects?: ProductEffectsJson;
   playfab_item_id?: string | null;
   playfab_store_id?: string | null;
+  playfab_catalog?: string | null;
 }
 
 @Injectable()
@@ -22,6 +24,7 @@ export class DispatchService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly state: OrderStateService,
+    private readonly fbCapi: FbCapiService,
     @Inject(MAIL_DISPATCHER) private readonly dispatcher: MailDispatcher,
   ) {}
 
@@ -48,7 +51,7 @@ export class DispatchService {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: {
-        user: { select: { uid: true } },
+        user: { select: { uid: true, email: true } },
         deliveryAttempts: {
           where: { status: DeliveryStatus.SUCCESS },
           take: 1,
@@ -108,6 +111,7 @@ export class DispatchService {
         priceTwd: Math.round(Number(order.amount)),
         playfabItemId: snapshot.playfab_item_id ?? null,
         playfabStoreId: snapshot.playfab_store_id ?? null,
+        playfabCatalog: snapshot.playfab_catalog ?? null,
         payload,
       });
     } catch (err) {
@@ -147,6 +151,13 @@ export class DispatchService {
           `Order ${order.facTradeSeq} force re-dispatched while already DELIVERED, no state change`,
         );
       }
+
+      // FB CAPI Purchase 事件(fire-and-forget,失敗不影響派發成功)
+      // 已送過(fbCapiSentAt 非 null)就不重送 — 避免 force re-dispatch 觸發第二次 Purchase
+      if (!order.fbCapiSentAt && !this.fbCapi.disabled) {
+        void this.fireFbCapiPurchase(order);
+      }
+
       return { ok: true, status: OrderStatus.DELIVERED };
     }
 
@@ -171,5 +182,45 @@ export class DispatchService {
       `Order ${order.facTradeSeq} 派發失敗(${attemptNumber}/${MAX_AUTO_RETRY}),維持 ${order.status}`,
     );
     return { ok: false, status: order.status };
+  }
+
+  /**
+   * fire-and-forget 寄 Purchase 給 FB CAPI,然後更新 fbCapiSentAt
+   * 失敗不 throw、不重試 — 訂單已 DELIVERED,廣告歸因斷掉不能反過來影響玩家
+   */
+  private async fireFbCapiPurchase(order: {
+    id: string;
+    facTradeSeq: string;
+    amount: Prisma.Decimal;
+    currency: string;
+    clientIp: string | null;
+    clientUserAgent: string | null;
+    fbp: string | null;
+    fbc: string | null;
+    user: { uid: string; email: string | null };
+  }): Promise<void> {
+    try {
+      const r = await this.fbCapi.sendPurchase({
+        eventId: order.facTradeSeq,
+        uid: order.user.uid,
+        value: Number(order.amount),
+        currency: order.currency,
+        email: order.user.email,
+        clientIp: order.clientIp,
+        clientUserAgent: order.clientUserAgent,
+        fbp: order.fbp,
+        fbc: order.fbc,
+      });
+      if (r.sent) {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: { fbCapiSentAt: new Date() },
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `FB CAPI 例外被 swallow:${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }

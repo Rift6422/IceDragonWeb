@@ -91,9 +91,24 @@ export class MyCardCallbackController {
       return;
     }
 
-    // 玩家瀏覽器 form-submit:hold 連線最多 6 秒,等 server callback 把訂單推到終態
-    // (CF 邊界 100 秒,Express keep-alive 預設 5 分鐘,6 秒足夠且玩家不會覺得久)
+    // 玩家瀏覽器 form-submit:這條路其實也帶著 MyCard 完整的交易結果(含 ReturnCode/ReturnMsg)。
+    // 先用同一套 handleTradeResult 處理 body —— 失敗單會記錄 ReturnCode/ReturnMsg + 寫 inbound log;
+    // 成功(派發)路徑在 handleTradeResult 內仍嚴格要求 Hash 正確,瀏覽器無法偽造成功。
+    // 處理完再 wait-and-join 等狀態收斂後 302 導回前台。
     const facTradeSeq = body.FacTradeSeq ?? '';
+    if (facTradeSeq) {
+      await this.callback
+        .handleTradeResult(body as Required<TradeResultBody>, {
+          sourceIp: req.ip,
+          userAgent: ua,
+          rawBody: JSON.stringify(body),
+        })
+        .catch((e) => {
+          // 處理失敗不可擋住玩家導頁;記 log 後照樣 wait-and-join
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+          return e;
+        });
+    }
     const target = await this.callback.waitForOrderResolution(facTradeSeq, 6000);
     res.redirect(302, target);
   }

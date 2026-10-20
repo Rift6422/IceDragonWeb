@@ -59,16 +59,17 @@ export class GameBackendMailDispatcher implements MailDispatcher {
       };
     }
 
-    const storeID =
+    const storeId =
       input.playfabStoreId ??
       this.config.get<string>('GAME_BACKEND_STORE_ID') ??
       'RMPacksStore';
 
     const result = await this.gameBackend.grantProduct({
       orderId: input.orderId,
-      storeID,
-      itemID: input.playfabItemId,
-      playerID: input.uid,
+      storeId,
+      itemId: input.playfabItemId,
+      catalog: input.playfabCatalog,
+      playerId: input.uid,
       priceTwd: input.priceTwd,
       language: 'zh-TW',
     });

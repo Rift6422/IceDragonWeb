@@ -1,4 +1,5 @@
 import { Controller, Get, Query, Res } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
 
 /**
@@ -10,20 +11,26 @@ import type { Response } from 'express';
  *     → 沒有 MyCard 的 IP/UA,不能套 MyCardSourceGuard
  *     → 拆成獨立 controller,不掛 guard
  *
- * 行為:把玩家導回前台首頁,帶 `?paid={FacTradeSeq}` 讓前端知道剛付完款,
+ * 行為:把玩家導回前台商城,帶 `?paid={FacTradeSeq}` 讓前端知道剛付完款,
  * 可以立刻 invalidate 商品 query 重撈最新限購狀態。
+ *
+ * 導回路徑帶遊戲命名空間前綴(PLAYER_STORE_BASE_PATH,例 /shindai-record),
+ * 玩家才會停在帶前綴的商城,不會掉回 root(與前端 root 強制轉入一致)。
  */
 @Controller('mycard')
 export class MyCardTradeReturnController {
+  constructor(private readonly config: ConfigService) {}
+
   @Get('trade-result')
   returnFromPayment(
     @Query('FacTradeSeq') facTradeSeq: string | undefined,
     @Res() res: Response,
   ): void {
     const seq = (facTradeSeq ?? '').trim();
-    const target = seq
-      ? `/?paid=${encodeURIComponent(seq)}`
-      : '/';
+    // 前綴正規化:去頭尾斜線後補前導斜線,留空 = root
+    const raw = (this.config.get<string>('PLAYER_STORE_BASE_PATH') ?? '').trim();
+    const base = raw ? `/${raw.replace(/^\/+|\/+$/g, '')}` : '';
+    const target = seq ? `${base}/?paid=${encodeURIComponent(seq)}` : `${base}/`;
     res.redirect(302, target);
   }
 }
